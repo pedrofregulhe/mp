@@ -87,18 +87,34 @@ div[data-testid="stMetric"] {
     flex-direction: column;
     height: 110px; 
 }
-div[data-testid="metric-container"] > label {
+
+/* Rótulo do KPI (texto pequeno acima do número) */
+div[data-testid="stMetricLabel"],
+div[data-testid="stMetricLabel"] p,
+div[data-testid="stMetricLabel"] label,
+div[data-testid="metric-container"] label {
     font-size: 11px !important;
-    font-weight: 600 !important;
-    color: #64748b;
+    font-weight: 700 !important;
+    color: #475569 !important;
     margin-bottom: 2px !important;
 }
-div[data-testid="metric-container"] > div {
-    font-size: 18px !important;
-    font-weight: 700 !important;
-    color: #0f172a;
+
+/* Valor do KPI (número grande) — em NEGRITO forte */
+div[data-testid="stMetricValue"],
+div[data-testid="stMetricValue"] > div,
+div[data-testid="metric-container"] > div > div {
+    font-size: 22px !important;
+    font-weight: 800 !important;
+    color: #0f172a !important;
 }
-div[data-testid="stMetricDelta"] { font-size: 10px !important; }
+
+/* Delta do KPI (descrição abaixo do número) */
+div[data-testid="stMetricDelta"],
+div[data-testid="stMetricDelta"] > div {
+    font-size: 10px !important;
+    font-weight: 600 !important;
+}
+
 div.block-container { padding-top: 1.2rem; padding-bottom: 1.2rem; }
 div[data-testid="metric-container"] {
     background-color: transparent !important;
@@ -524,16 +540,19 @@ def construir_mapa_cep_prestador(ceps_unicos_tuple, df_ranges, dict_depara):
     return {cep: encontrar_prestador(cep) for cep in ceps_unicos_tuple if pd.notna(cep)}
 
 # ==========================================
-# 4. CARREGAMENTO DOS ARQUIVOS DE APOIO ESTÁVEIS
+# 4. CARREGAMENTO DOS ARQUIVOS DE APOIO DA PASTA
 # ==========================================
-# Range CEP e De-Para são arquivos de cadastro que mudam pouco, ficam na pasta do app
-# junto com o código. Capacidade muda toda hora e vem por upload manual em cada aba.
+# Range CEP, De-Para e Capacidade são lidos automaticamente da pasta do app.
+# Para atualizar, basta substituir o arquivo na pasta e clicar em "Atualizar".
 PASTA_APP = os.path.dirname(os.path.abspath(__file__))
 ARQUIVO_RANGE_CEP = os.path.join(PASTA_APP, 'Range CEP.xlsx')
 ARQUIVO_DEPARA = os.path.join(PASTA_APP, 'De-Para.xlsx')
+ARQUIVO_CAPACIDADE = os.path.join(PASTA_APP, 'Capacidade.xlsx')
 
 bytes_range_cep = None
 bytes_depara = None
+bytes_capacidade = None
+ts_capacidade = None
 erro_arquivos_estaveis = None
 
 if os.path.exists(ARQUIVO_RANGE_CEP) and os.path.exists(ARQUIVO_DEPARA):
@@ -555,6 +574,17 @@ else:
         f"As análises que dependem de capacidade ficarão desabilitadas até o cadastro estar completo."
     )
 
+# Capacidade: lida da pasta também, com timestamp para mostrar quando foi atualizada
+if os.path.exists(ARQUIVO_CAPACIDADE):
+    try:
+        with open(ARQUIVO_CAPACIDADE, 'rb') as f:
+            bytes_capacidade = f.read()
+        # Captura a data/hora de modificação do arquivo para exibir na UI
+        ts_mod = os.path.getmtime(ARQUIVO_CAPACIDADE)
+        ts_capacidade = datetime.fromtimestamp(ts_mod, tz=FUSO_BR).strftime('%d/%m/%Y às %H:%M')
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao ler Capacidade.xlsx da pasta: {e}")
+
 # Processa os arquivos estáveis uma única vez (cacheado pelo hash dos bytes)
 df_ranges = None
 dict_depara = None
@@ -568,60 +598,31 @@ if bytes_range_cep is not None and bytes_depara is not None:
         erro_arquivos_estaveis = f"Erro ao processar arquivos de cadastro: {e}"
 
 # ==========================================
-# 4.1. HELPER DE UPLOAD DE CAPACIDADE (usado dentro das abas)
+# 4.1. HELPER DE LEITURA DA CAPACIDADE (lida da pasta, retorna dados processados)
 # ==========================================
 def obter_capacidade_da_sessao(chave_aba):
     """
-    Renderiza o controle de upload da Capacidade dentro de uma aba.
+    Retorna os dados de capacidade (df_cap_mp, capacidade_agrupada), lidos automaticamente
+    da pasta do app via Capacidade.xlsx. Também exibe uma linha discreta com a data/hora
+    de modificação do arquivo, para o usuário saber quando a foto foi atualizada.
     
-    Comportamento:
-    - Se ainda não há capacidade carregada nesta sessão: mostra o file_uploader.
-    - Se já há: mostra um aviso discreto com o nome do arquivo e a hora do upload,
-      além de um botão "Trocar arquivo" para subir outra versão.
-    
-    O arquivo fica em st.session_state, então é compartilhado entre as abas — ou seja,
-    a pessoa sobe uma vez por sessão e todas as abas que precisam vão reusar.
-    
-    Retorna: (df_cap_mp, capacidade_agrupada) ou (None, None) se não há arquivo carregado.
+    Retorna: (df_cap_mp, capacidade_agrupada) ou (None, None) se o arquivo não existe.
     """
-    # Verifica se já temos capacidade na sessão
-    if 'capacidade_bytes' in st.session_state and st.session_state['capacidade_bytes'] is not None:
-        nome_arq = st.session_state.get('capacidade_nome', 'Capacidade.xlsx')
-        hora_upload = st.session_state.get('capacidade_hora', '')
-        
-        col_status, col_trocar = st.columns([5, 1])
-        with col_status:
-            st.success(f"✅ Capacidade carregada: **{nome_arq}** &nbsp;•&nbsp; upload às {hora_upload}")
-        with col_trocar:
-            if st.button("🔄 Trocar arquivo", key=f"trocar_cap_{chave_aba}"):
-                st.session_state['capacidade_bytes'] = None
-                st.session_state.pop('capacidade_nome', None)
-                st.session_state.pop('capacidade_hora', None)
-                st.rerun()
-        
-        try:
-            return processar_capacidade(st.session_state['capacidade_bytes'])
-        except Exception as e:
-            st.error(f"Erro ao processar o arquivo de Capacidade: {e}")
-            return None, None
+    if bytes_capacidade is None:
+        st.warning(
+            "⚠️ O arquivo **Capacidade.xlsx** não foi encontrado na pasta do app. "
+            "Substitua o arquivo na pasta e clique em **🔄 Atualizar** no topo para recarregar."
+        )
+        return None, None
     
-    # Ainda não tem arquivo carregado: mostra o uploader
-    st.info(
-        "📥 Para visualizar esta análise, faça o upload do **Capacidade.xlsx atualizado**. "
-        "O arquivo será reutilizado em todas as abas durante esta sessão."
-    )
-    arquivo = st.file_uploader(
-        "Upload do relatório de Capacidade (.xlsx):",
-        type=['xlsx'],
-        key=f"uploader_cap_{chave_aba}",
-        label_visibility="collapsed"
-    )
-    if arquivo is not None:
-        st.session_state['capacidade_bytes'] = arquivo.getvalue()
-        st.session_state['capacidade_nome'] = arquivo.name
-        st.session_state['capacidade_hora'] = datetime.now(FUSO_BR).strftime('%H:%M:%S')
-        st.rerun()
-    return None, None
+    # Exibe data/hora de atualização do arquivo
+    st.caption(f"📂 Capacidade lida do arquivo da pasta &nbsp;•&nbsp; atualizado em **{ts_capacidade}**")
+    
+    try:
+        return processar_capacidade(bytes_capacidade)
+    except Exception as e:
+        st.error(f"Erro ao processar o arquivo de Capacidade: {e}")
+        return None, None
 
 # ==========================================
 # 5. CARGA DOS DADOS
@@ -670,6 +671,8 @@ if classificacoes_selecionadas:
 else:
     info_msg += f"{total_reg_original:,} registros &nbsp;|&nbsp; ".replace(",", ".")
 info_msg += "cache válido por 6h"
+if ts_capacidade:
+    info_msg += f" &nbsp;|&nbsp; 📂 Capacidade.xlsx: <b>{ts_capacidade}</b>"
 if falhas_parse > 0:
     info_msg += f" &nbsp;|&nbsp; ⚠️ {falhas_parse} datas de OS não puderam ser parseadas"
 if classificacoes_selecionadas:
