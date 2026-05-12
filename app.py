@@ -1274,82 +1274,68 @@ with aba_mailing:
                 df_mail_final['Data_Vencimento_MP'] = df_mail_final['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
                 
                 # ----------------------------------------------------------
-                # EXPANSÃO POR CONTATOS: para cada contrato selecionado, gera N linhas
-                # (uma por contato disponível: telefone OU e-mail, em cada fonte).
-                # A regra de capacidade JÁ FOI APLICADA antes — aqui só adicionamos
-                # as informações de contato para acionamento.
+                # TELEFONES EM COLUNAS: cada contrato continua em UMA linha,
+                # mas ganha colunas adicionais "Telefone 01", "Telefone 02", ...
+                # com todos os telefones únicos disponíveis daquele CNPJ
+                # (vindos do Cadastro + Contact + AccountContactRelation).
                 # ----------------------------------------------------------
                 df_contatos_long = df_final.attrs.get('contatos_long', pd.DataFrame())
                 
-                # Base de colunas do contrato
-                cols_mail_base = [
+                # Filtra apenas telefones, deduplica por CNPJ + valor (mesmo número em
+                # fontes diferentes não vira duplicidade) e numera sequencialmente
+                tel_por_cnpj = {}
+                if df_contatos_long is not None and not df_contatos_long.empty:
+                    df_tel = df_contatos_long[df_contatos_long['Tipo'] == 'Telefone'].copy()
+                    if not df_tel.empty:
+                        # Normaliza o telefone (só dígitos) para deduplicação, mas mantém o
+                        # valor original para exibição
+                        df_tel['_normalizado'] = df_tel['Valor'].astype(str).str.replace(r'\D', '', regex=True)
+                        df_tel = df_tel[df_tel['_normalizado'].str.len() >= 8]  # descarta lixo curto
+                        df_tel = df_tel.drop_duplicates(subset=['CNPJ_Limpo', '_normalizado'], keep='first')
+                        
+                        # Agrupa por CNPJ e empilha os telefones em lista
+                        for cnpj, grupo in df_tel.groupby('CNPJ_Limpo'):
+                            tel_por_cnpj[cnpj] = grupo['Valor'].tolist()
+                
+                # Quantas colunas de telefone serão criadas? (máximo entre todos os clientes do mailing)
+                max_tel = 0
+                for cnpj in df_mail_final['Account.CNPJ__c']:
+                    max_tel = max(max_tel, len(tel_por_cnpj.get(cnpj, [])))
+                
+                # Cria as colunas Telefone 01, Telefone 02, ... no DataFrame de exibição
+                df_mail_show = df_mail_final.copy()
+                for i in range(max_tel):
+                    col_nome = f"Telefone {i+1:02d}"
+                    df_mail_show[col_nome] = df_mail_show['Account.CNPJ__c'].apply(
+                        lambda c: tel_por_cnpj.get(c, [])[i] if i < len(tel_por_cnpj.get(c, [])) else ''
+                    )
+                
+                # Monta o DataFrame final na ordem de colunas que o usuário pediu
+                cols_finais = [
                     'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
                     'Status_Financeiro', 'Data_Vencimento_MP', 'Dias_Atraso',
                     'Prestador_CEP', 'Capacidade Disponível'
-                ]
-                df_mail_base_show = df_mail_final[cols_mail_base].copy()
+                ] + [f"Telefone {i+1:02d}" for i in range(max_tel)]
                 
-                if df_contatos_long is not None and not df_contatos_long.empty:
-                    # Merge many-to-many: cada contrato pode virar várias linhas
-                    df_mail_expandido = pd.merge(
-                        df_mail_base_show,
-                        df_contatos_long,
-                        left_on='Account.CNPJ__c',
-                        right_on='CNPJ_Limpo',
-                        how='left'
-                    )
-                    # Para clientes SEM nenhum contato registrado, mantém uma linha única
-                    # com os campos de contato vazios (em vez de excluir o cliente do mailing)
-                    df_mail_expandido['Origem'] = df_mail_expandido['Origem'].fillna('— sem contato cadastrado —')
-                    df_mail_expandido['Tipo'] = df_mail_expandido['Tipo'].fillna('')
-                    df_mail_expandido['Valor'] = df_mail_expandido['Valor'].fillna('')
-                    df_mail_expandido['Nome_Contato'] = df_mail_expandido['Nome_Contato'].fillna('')
-                    df_mail_expandido['Cargo'] = df_mail_expandido['Cargo'].fillna('')
-                    
-                    df_exibicao_mail = df_mail_expandido[[
-                        'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
-                        'Status_Financeiro', 'Data_Vencimento_MP', 'Dias_Atraso',
-                        'Prestador_CEP', 'Capacidade Disponível',
-                        'Origem', 'Nome_Contato', 'Cargo', 'Tipo', 'Valor'
-                    ]].rename(columns={
-                        'FOZ_CodigoItem__c': 'Cód. Item',
-                        'Account.Name': 'Cliente',
-                        'Account.CNPJ__c': 'CNPJ',
-                        'Qtd_Contratos_Cliente': 'Qtd Contratos',
-                        'Status_Financeiro': 'Status Fin.',
-                        'Data_Vencimento_MP': 'Vencimento MP',
-                        'Dias_Atraso': 'Dias Atraso',
-                        'Prestador_CEP': 'Grade/Franquia',
-                        'Capacidade Disponível': 'Vagas na Região',
-                        'Origem': 'Origem Contato',
-                        'Nome_Contato': 'Nome do Contato',
-                        'Cargo': 'Cargo',
-                        'Tipo': 'Canal',
-                        'Valor': 'Telefone / E-mail'
-                    }).sort_values(by=['Grade/Franquia', 'Dias Atraso', 'Cód. Item', 'Canal'], 
-                                   ascending=[True, False, True, True])
-                else:
-                    # Não há dados de contatos: mailing fica como antes, sem colunas de contato
-                    df_exibicao_mail = df_mail_base_show.rename(columns={
-                        'FOZ_CodigoItem__c': 'Cód. Item', 'Account.Name': 'Cliente',
-                        'Account.CNPJ__c': 'CNPJ', 'Qtd_Contratos_Cliente': 'Qtd Contratos',
-                        'Status_Financeiro': 'Status Fin.', 'Data_Vencimento_MP': 'Vencimento MP',
-                        'Dias_Atraso': 'Dias Atraso',
-                        'Prestador_CEP': 'Grade/Franquia', 'Capacidade Disponível': 'Vagas na Região'
-                    }).sort_values(by='Vagas na Região', ascending=False)
+                df_exibicao_mail = df_mail_show[cols_finais].rename(columns={
+                    'FOZ_CodigoItem__c': 'Cód. Item',
+                    'Account.Name': 'Cliente',
+                    'Account.CNPJ__c': 'CNPJ',
+                    'Qtd_Contratos_Cliente': 'Qtd Contratos',
+                    'Status_Financeiro': 'Status Fin.',
+                    'Data_Vencimento_MP': 'Vencimento MP',
+                    'Dias_Atraso': 'Dias Atraso',
+                    'Prestador_CEP': 'Grade/Franquia',
+                    'Capacidade Disponível': 'Vagas na Região'
+                }).sort_values(by=['Vagas na Região', 'Dias Atraso'], ascending=[False, False])
                 
-                # Estatísticas do mailing expandido
-                qtd_contratos_unicos = df_mail_final['FOZ_CodigoItem__c'].nunique()
-                qtd_linhas = len(df_exibicao_mail)
-                qtd_clientes_sem_contato = 0
-                if 'Origem Contato' in df_exibicao_mail.columns:
-                    sem_contato = df_exibicao_mail[df_exibicao_mail['Origem Contato'] == '— sem contato cadastrado —']
-                    qtd_clientes_sem_contato = sem_contato['Cód. Item'].nunique()
+                # Estatísticas
+                qtd_sem_tel = (df_exibicao_mail[df_exibicao_mail.columns[df_exibicao_mail.columns.str.startswith('Telefone')].tolist()].eq('').all(axis=1).sum()
+                               if max_tel > 0 else len(df_exibicao_mail))
                 
                 st.caption(
-                    f"📋 **{qtd_contratos_unicos}** contratos expandidos em **{qtd_linhas}** linhas "
-                    f"(uma por canal de contato disponível). "
-                    f"**{qtd_clientes_sem_contato}** contrato(s) sem nenhum contato cadastrado."
+                    f"📋 **{len(df_exibicao_mail)} contratos** no mailing — até **{max_tel} telefone(s)** "
+                    f"por cliente. **{qtd_sem_tel}** contrato(s) sem nenhum telefone cadastrado."
                 )
                 
                 st.dataframe(df_exibicao_mail, use_container_width=True, hide_index=True)
