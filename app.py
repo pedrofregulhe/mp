@@ -194,7 +194,7 @@ def exibir_extrato_resumido(df_alvo, key_download=None):
 # ==========================================
 # 3. CONEXÃO E PROCESSAMENTO
 # ==========================================
-@st.cache_data(ttl=21600, show_spinner=False, persist="disk")
+@st.cache_data(ttl=21600, show_spinner=False)
 def carregar_dados_completos():
     sf = Salesforce(
         username=st.secrets["salesforce"]["username"], 
@@ -208,7 +208,7 @@ def carregar_dados_completos():
         FOZ_Contrato_Anterior__c, FOZ_DataUltimaMP__c, FOZ_DataProximaMP__c, 
         FOZ_ValorTotal__c, AccountId, Account.Name, Account.FOZ_StatusPosicaoFinanceira__c, 
         Account.CNPJ__c, Account.FOZ_Classificacao__c,
-        Account.PersonEmail, Account.PersonMobilePhone,
+        Account.PersonMobilePhone,
         FOZ_EndFranquiaForm__c, FOZ_EnderecoEntrega__r.FOZ_CEP__c
     FROM Asset
     WHERE Status = 'Ativo-Em Operação'
@@ -218,25 +218,24 @@ def carregar_dados_completos():
     SELECT Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.CaseNumber, Case.Status, FOZ_Agendado_Data_Periodo__c, FOZ_Tipo_de_Servico__c
     FROM WorkOrder WHERE Case.Type = 'OS' AND Case.Status != 'Cancelado' AND Case.Status != 'Fechado' AND Status != 'Cancelado' AND Status != 'Fechado'
     """
-    # Novas queries para captura TODOS os contatos (telefone + e-mail) por cliente,
-    # vindos das duas fontes complementares do modelo de dados (Contact e AccountContactRelation).
-    # A unicidade é por (CNPJ, telefone/email, fonte).
+    # Queries enxutas: só os campos realmente usados no painel (telefones para o mailing).
+    # FirstName, LastName, Title, Email e LastModifiedDate foram removidos para reduzir
+    # o volume de dados trafegado e o footprint de memória.
     query_contatos_completos = """
     SELECT 
         Account.CNPJ__c, Account.FOZ_CNPJ__c,
-        FirstName, LastName, MobilePhone, Phone, Email, Title, LastModifiedDate
+        MobilePhone, Phone
     FROM Contact 
     WHERE (Account.CNPJ__c != null OR Account.FOZ_CNPJ__c != null)
-      AND (MobilePhone != null OR Phone != null OR Email != null)
+      AND (MobilePhone != null OR Phone != null)
     """
     query_acr_completos = """
     SELECT 
         Account.CNPJ__c, Account.FOZ_CNPJ__c,
-        Contact.FirstName, Contact.LastName, Contact.MobilePhone, Contact.Phone, 
-        Contact.Email, Contact.Title, Contact.LastModifiedDate
+        Contact.MobilePhone, Contact.Phone
     FROM AccountContactRelation
     WHERE (Account.CNPJ__c != null OR Account.FOZ_CNPJ__c != null)
-      AND (Contact.MobilePhone != null OR Contact.Phone != null OR Contact.Email != null)
+      AND (Contact.MobilePhone != null OR Contact.Phone != null)
     """
     
     registros_ativos = sf.query_all(query_ativos).get('records', [])
@@ -249,6 +248,11 @@ def carregar_dados_completos():
     df_contatos = pd.json_normalize(registros_contatos)
     df_contatos_completos = pd.json_normalize(registros_contatos_completos) if registros_contatos_completos else pd.DataFrame()
     df_acr_completos = pd.json_normalize(registros_acr_completos) if registros_acr_completos else pd.DataFrame()
+    
+    # Libera as listas de dicts já que viraram DataFrames (cada lista de ~50k items
+    # de dicts Python ocupa centenas de MB; o DataFrame equivalente ocupa muito menos).
+    # Mantemos apenas registros_os, que ainda é iterado abaixo.
+    del registros_ativos, registros_contatos, registros_contatos_completos, registros_acr_completos
     
     hoje = datetime.now(FUSO_BR)
     mes_atual = hoje.month
@@ -282,6 +286,7 @@ def carregar_dados_completos():
         })
     
     df_os = pd.DataFrame(lista_os)
+    del lista_os, registros_os  # libera memória das listas iteradas
     if not df_os.empty:
         df_os = df_os.sort_values(by=['Agendado_Mes_Atual', 'Tem_Data'], ascending=[False, False]).drop_duplicates(subset=['CodigoItem'])
     
@@ -384,102 +389,82 @@ def carregar_dados_completos():
     df['Qtd_Contratos_Cliente'] = df['Account.CNPJ__c'].map(qtd_contratos_por_cnpj).fillna(1).astype(int)
     
     # ==========================================
-    # CONTATOS COMPLETOS (uma linha por contato/canal)
+    # TELEFONES POR CNPJ (versão vetorizada — otimizada para memória)
     # ==========================================
-    # Monta uma tabela LONGA com todos os contatos disponíveis por CNPJ, vinda de 3 fontes:
-    #   1) Dados pessoais do Account (PersonEmail / PersonMobilePhone)
+    # Constrói uma tabela com (CNPJ_Limpo, Valor_telefone) extraída de 3 fontes:
+    #   1) Dados pessoais do Account (PersonMobilePhone do próprio Asset.Account)
     #   2) Objeto Contact relacionado à Account
     #   3) AccountContactRelation (contatos cross-account)
-    # Cada linha representa UM canal (telefone OU e-mail) de UMA pessoa em UMA fonte.
-    # A unicidade é por (CNPJ, valor, tipo, fonte) — telefones/emails iguais entre fontes
-    # ficam separados para o usuário ver qual fonte tem a informação.
+    # Apenas telefones (e-mails não são utilizados pelo painel). Toda a montagem é
+    # vetorizada com pd.concat — evita iterrows() que cria milhões de dicts intermediários.
     
-    linhas_contatos = []
+    frames_tel = []
     
-    # FONTE 1: Account pessoa física (PersonEmail / PersonMobilePhone do próprio Asset.Account)
-    if 'Account.PersonEmail' in df.columns or 'Account.PersonMobilePhone' in df.columns:
-        df_pessoa = df[['Account.CNPJ__c']].copy()
-        df_pessoa['CNPJ_Limpo'] = df_pessoa['Account.CNPJ__c']  # já vem limpo
-        if 'Account.PersonMobilePhone' in df.columns:
-            df_pessoa['Telefone'] = df['Account.PersonMobilePhone']
-        else:
-            df_pessoa['Telefone'] = None
-        if 'Account.PersonEmail' in df.columns:
-            df_pessoa['Email'] = df['Account.PersonEmail']
-        else:
-            df_pessoa['Email'] = None
-        df_pessoa = df_pessoa.dropna(subset=['CNPJ_Limpo']).drop_duplicates(subset=['CNPJ_Limpo'])
-        for _, row in df_pessoa.iterrows():
-            cnpj = row['CNPJ_Limpo']
-            if pd.notna(row['Telefone']) and str(row['Telefone']).strip():
-                linhas_contatos.append({
-                    'CNPJ_Limpo': cnpj, 'Origem': 'Cadastro do Cliente',
-                    'Nome_Contato': 'Titular', 'Cargo': '',
-                    'Tipo': 'Telefone', 'Valor': str(row['Telefone']).strip()
-                })
-            if pd.notna(row['Email']) and str(row['Email']).strip():
-                linhas_contatos.append({
-                    'CNPJ_Limpo': cnpj, 'Origem': 'Cadastro do Cliente',
-                    'Nome_Contato': 'Titular', 'Cargo': '',
-                    'Tipo': 'E-mail', 'Valor': str(row['Email']).strip()
-                })
+    # FONTE 1: PersonMobilePhone do Account
+    if 'Account.PersonMobilePhone' in df.columns:
+        s1 = df[['Account.CNPJ__c', 'Account.PersonMobilePhone']].dropna()
+        s1 = s1[s1['Account.PersonMobilePhone'].astype(str).str.strip() != '']
+        s1 = s1.drop_duplicates(subset=['Account.CNPJ__c'])
+        if not s1.empty:
+            frames_tel.append(pd.DataFrame({
+                'CNPJ_Limpo': s1['Account.CNPJ__c'].values,
+                'Valor': s1['Account.PersonMobilePhone'].astype(str).str.strip().values,
+            }))
     
-    # Helper para CNPJ do Contact / ACR (pode vir em CNPJ__c ou FOZ_CNPJ__c)
-    def _cnpj_unificado(row):
-        cnpj1 = row.get('Account.CNPJ__c')
-        cnpj2 = row.get('Account.FOZ_CNPJ__c')
-        valor = cnpj1 if pd.notna(cnpj1) and str(cnpj1).strip() else cnpj2
-        return manter_apenas_numeros(valor) if pd.notna(valor) else None
-    
-    # FONTE 2: Contact (uma linha por contato relacionado)
+    # FONTE 2: Contact (campos MobilePhone e Phone)
     if not df_contatos_completos.empty:
-        df_c = df_contatos_completos.copy()
-        df_c['CNPJ_Limpo'] = df_c.apply(_cnpj_unificado, axis=1)
-        df_c = df_c.dropna(subset=['CNPJ_Limpo'])
-        for _, row in df_c.iterrows():
-            cnpj = row['CNPJ_Limpo']
-            nome = f"{str(row.get('FirstName') or '').strip()} {str(row.get('LastName') or '').strip()}".strip() or 'Sem nome'
-            cargo = str(row.get('Title') or '').strip()
-            for col, tipo in [('MobilePhone', 'Telefone'), ('Phone', 'Telefone'), ('Email', 'E-mail')]:
-                val = row.get(col)
-                if pd.notna(val) and str(val).strip():
-                    linhas_contatos.append({
-                        'CNPJ_Limpo': cnpj, 'Origem': 'Contatos (Contact)',
-                        'Nome_Contato': nome, 'Cargo': cargo,
-                        'Tipo': tipo, 'Valor': str(val).strip()
-                    })
+        # Unifica o CNPJ vindo de Account.CNPJ__c OU Account.FOZ_CNPJ__c (vetorizado)
+        cnpj_a = df_contatos_completos.get('Account.CNPJ__c', pd.Series([None]*len(df_contatos_completos)))
+        cnpj_b = df_contatos_completos.get('Account.FOZ_CNPJ__c', pd.Series([None]*len(df_contatos_completos)))
+        cnpj_unif = cnpj_a.fillna(cnpj_b).astype(str).str.replace(r'\D', '', regex=True)
+        cnpj_unif = cnpj_unif.where(cnpj_unif.str.len() >= 11, None)  # CNPJ tem ≥11 dígitos
+        
+        for col in ['MobilePhone', 'Phone']:
+            if col in df_contatos_completos.columns:
+                tel = df_contatos_completos[col].astype(str).str.strip()
+                mask = (cnpj_unif.notna()) & (tel.notna()) & (tel != '') & (tel.str.lower() != 'nan')
+                if mask.any():
+                    frames_tel.append(pd.DataFrame({
+                        'CNPJ_Limpo': cnpj_unif[mask].values,
+                        'Valor': tel[mask].values,
+                    }))
     
-    # FONTE 3: AccountContactRelation (contatos cross-account)
+    # FONTE 3: AccountContactRelation (mesma lógica, com colunas Contact.X)
     if not df_acr_completos.empty:
-        df_a = df_acr_completos.copy()
-        # Renomeia as colunas aninhadas Contact.X -> X para reuso do mesmo código
-        df_a = df_a.rename(columns={
-            'Contact.FirstName': 'FirstName', 'Contact.LastName': 'LastName',
-            'Contact.MobilePhone': 'MobilePhone', 'Contact.Phone': 'Phone',
-            'Contact.Email': 'Email', 'Contact.Title': 'Title',
-            'Contact.LastModifiedDate': 'LastModifiedDate'
-        })
-        df_a['CNPJ_Limpo'] = df_a.apply(_cnpj_unificado, axis=1)
-        df_a = df_a.dropna(subset=['CNPJ_Limpo'])
-        for _, row in df_a.iterrows():
-            cnpj = row['CNPJ_Limpo']
-            nome = f"{str(row.get('FirstName') or '').strip()} {str(row.get('LastName') or '').strip()}".strip() or 'Sem nome'
-            cargo = str(row.get('Title') or '').strip()
-            for col, tipo in [('MobilePhone', 'Telefone'), ('Phone', 'Telefone'), ('Email', 'E-mail')]:
-                val = row.get(col)
-                if pd.notna(val) and str(val).strip():
-                    linhas_contatos.append({
-                        'CNPJ_Limpo': cnpj, 'Origem': 'Contatos (ACR)',
-                        'Nome_Contato': nome, 'Cargo': cargo,
-                        'Tipo': tipo, 'Valor': str(val).strip()
-                    })
+        cnpj_a = df_acr_completos.get('Account.CNPJ__c', pd.Series([None]*len(df_acr_completos)))
+        cnpj_b = df_acr_completos.get('Account.FOZ_CNPJ__c', pd.Series([None]*len(df_acr_completos)))
+        cnpj_unif = cnpj_a.fillna(cnpj_b).astype(str).str.replace(r'\D', '', regex=True)
+        cnpj_unif = cnpj_unif.where(cnpj_unif.str.len() >= 11, None)
+        
+        for col in ['Contact.MobilePhone', 'Contact.Phone']:
+            if col in df_acr_completos.columns:
+                tel = df_acr_completos[col].astype(str).str.strip()
+                mask = (cnpj_unif.notna()) & (tel.notna()) & (tel != '') & (tel.str.lower() != 'nan')
+                if mask.any():
+                    frames_tel.append(pd.DataFrame({
+                        'CNPJ_Limpo': cnpj_unif[mask].values,
+                        'Valor': tel[mask].values,
+                    }))
     
-    df_contatos_long = pd.DataFrame(linhas_contatos)
-    if not df_contatos_long.empty:
-        # Remove duplicatas exatas (mesmo CNPJ + mesmo Valor + mesmo Tipo + mesma Origem)
+    # Libera os DataFrames de contatos auxiliares (já viraram telefones na tabela final)
+    del df_contatos_completos, df_acr_completos
+    
+    if frames_tel:
+        df_contatos_long = pd.concat(frames_tel, ignore_index=True)
+        # Deduplica pelo telefone normalizado (só dígitos) — mesmo número em formatos
+        # diferentes (com/sem máscara) é considerado o mesmo
+        df_contatos_long['_norm'] = df_contatos_long['Valor'].astype(str).str.replace(r'\D', '', regex=True)
+        df_contatos_long = df_contatos_long[df_contatos_long['_norm'].str.len() >= 8]
         df_contatos_long = df_contatos_long.drop_duplicates(
-            subset=['CNPJ_Limpo', 'Tipo', 'Valor', 'Origem'], keep='first'
-        ).reset_index(drop=True)
+            subset=['CNPJ_Limpo', '_norm'], keep='first'
+        )
+        df_contatos_long = df_contatos_long.drop(columns=['_norm'])
+        # Coluna Tipo é redundante (só temos telefones), mas mantida por compatibilidade
+        # com o código da aba mailing que filtra por Tipo == 'Telefone'
+        df_contatos_long['Tipo'] = 'Telefone'
+        df_contatos_long = df_contatos_long.reset_index(drop=True)
+    else:
+        df_contatos_long = pd.DataFrame(columns=['CNPJ_Limpo', 'Valor', 'Tipo'])
     
     # Metadados úteis para a UI
     df.attrs['timestamp_carga'] = hoje.strftime('%d/%m/%Y %H:%M:%S')
