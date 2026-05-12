@@ -208,6 +208,7 @@ def carregar_dados_completos():
         FOZ_Contrato_Anterior__c, FOZ_DataUltimaMP__c, FOZ_DataProximaMP__c, 
         FOZ_ValorTotal__c, AccountId, Account.Name, Account.FOZ_StatusPosicaoFinanceira__c, 
         Account.CNPJ__c, Account.FOZ_Classificacao__c,
+        Account.PersonEmail, Account.PersonMobilePhone,
         FOZ_EndFranquiaForm__c, FOZ_EnderecoEntrega__r.FOZ_CEP__c
     FROM Asset
     WHERE Status = 'Ativo-Em Operação'
@@ -217,13 +218,37 @@ def carregar_dados_completos():
     SELECT Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.CaseNumber, Case.Status, FOZ_Agendado_Data_Periodo__c, FOZ_Tipo_de_Servico__c
     FROM WorkOrder WHERE Case.Type = 'OS' AND Case.Status != 'Cancelado' AND Case.Status != 'Fechado' AND Status != 'Cancelado' AND Status != 'Fechado'
     """
+    # Novas queries para captura TODOS os contatos (telefone + e-mail) por cliente,
+    # vindos das duas fontes complementares do modelo de dados (Contact e AccountContactRelation).
+    # A unicidade é por (CNPJ, telefone/email, fonte).
+    query_contatos_completos = """
+    SELECT 
+        Account.CNPJ__c, Account.FOZ_CNPJ__c,
+        FirstName, LastName, MobilePhone, Phone, Email, Title, LastModifiedDate
+    FROM Contact 
+    WHERE (Account.CNPJ__c != null OR Account.FOZ_CNPJ__c != null)
+      AND (MobilePhone != null OR Phone != null OR Email != null)
+    """
+    query_acr_completos = """
+    SELECT 
+        Account.CNPJ__c, Account.FOZ_CNPJ__c,
+        Contact.FirstName, Contact.LastName, Contact.MobilePhone, Contact.Phone, 
+        Contact.Email, Contact.Title, Contact.LastModifiedDate
+    FROM AccountContactRelation
+    WHERE (Account.CNPJ__c != null OR Account.FOZ_CNPJ__c != null)
+      AND (Contact.MobilePhone != null OR Contact.Phone != null OR Contact.Email != null)
+    """
     
     registros_ativos = sf.query_all(query_ativos).get('records', [])
     registros_contatos = sf.query_all(query_contatos).get('records', [])
     registros_os = sf.query_all(query_os).get('records', [])
+    registros_contatos_completos = sf.query_all(query_contatos_completos).get('records', [])
+    registros_acr_completos = sf.query_all(query_acr_completos).get('records', [])
     
     df_ativos = pd.json_normalize(registros_ativos)
     df_contatos = pd.json_normalize(registros_contatos)
+    df_contatos_completos = pd.json_normalize(registros_contatos_completos) if registros_contatos_completos else pd.DataFrame()
+    df_acr_completos = pd.json_normalize(registros_acr_completos) if registros_acr_completos else pd.DataFrame()
     
     hoje = datetime.now(FUSO_BR)
     mes_atual = hoje.month
@@ -353,10 +378,114 @@ def carregar_dados_completos():
     df['CEP_Limpo'] = df['FOZ_EnderecoEntrega__r.FOZ_CEP__c'].astype(str).str.replace(r'\D', '', regex=True)
     df['CEP_Num'] = pd.to_numeric(df['CEP_Limpo'], errors='coerce')
     
+    # Quantidade de contratos (ativos) que cada cliente possui — útil para o mailing
+    # e para qualquer extrato. Aparece como nova coluna em cada linha da base.
+    qtd_contratos_por_cnpj = df.groupby('Account.CNPJ__c')['FOZ_CodigoItem__c'].count()
+    df['Qtd_Contratos_Cliente'] = df['Account.CNPJ__c'].map(qtd_contratos_por_cnpj).fillna(1).astype(int)
+    
+    # ==========================================
+    # CONTATOS COMPLETOS (uma linha por contato/canal)
+    # ==========================================
+    # Monta uma tabela LONGA com todos os contatos disponíveis por CNPJ, vinda de 3 fontes:
+    #   1) Dados pessoais do Account (PersonEmail / PersonMobilePhone)
+    #   2) Objeto Contact relacionado à Account
+    #   3) AccountContactRelation (contatos cross-account)
+    # Cada linha representa UM canal (telefone OU e-mail) de UMA pessoa em UMA fonte.
+    # A unicidade é por (CNPJ, valor, tipo, fonte) — telefones/emails iguais entre fontes
+    # ficam separados para o usuário ver qual fonte tem a informação.
+    
+    linhas_contatos = []
+    
+    # FONTE 1: Account pessoa física (PersonEmail / PersonMobilePhone do próprio Asset.Account)
+    if 'Account.PersonEmail' in df.columns or 'Account.PersonMobilePhone' in df.columns:
+        df_pessoa = df[['Account.CNPJ__c']].copy()
+        df_pessoa['CNPJ_Limpo'] = df_pessoa['Account.CNPJ__c']  # já vem limpo
+        if 'Account.PersonMobilePhone' in df.columns:
+            df_pessoa['Telefone'] = df['Account.PersonMobilePhone']
+        else:
+            df_pessoa['Telefone'] = None
+        if 'Account.PersonEmail' in df.columns:
+            df_pessoa['Email'] = df['Account.PersonEmail']
+        else:
+            df_pessoa['Email'] = None
+        df_pessoa = df_pessoa.dropna(subset=['CNPJ_Limpo']).drop_duplicates(subset=['CNPJ_Limpo'])
+        for _, row in df_pessoa.iterrows():
+            cnpj = row['CNPJ_Limpo']
+            if pd.notna(row['Telefone']) and str(row['Telefone']).strip():
+                linhas_contatos.append({
+                    'CNPJ_Limpo': cnpj, 'Origem': 'Cadastro do Cliente',
+                    'Nome_Contato': 'Titular', 'Cargo': '',
+                    'Tipo': 'Telefone', 'Valor': str(row['Telefone']).strip()
+                })
+            if pd.notna(row['Email']) and str(row['Email']).strip():
+                linhas_contatos.append({
+                    'CNPJ_Limpo': cnpj, 'Origem': 'Cadastro do Cliente',
+                    'Nome_Contato': 'Titular', 'Cargo': '',
+                    'Tipo': 'E-mail', 'Valor': str(row['Email']).strip()
+                })
+    
+    # Helper para CNPJ do Contact / ACR (pode vir em CNPJ__c ou FOZ_CNPJ__c)
+    def _cnpj_unificado(row):
+        cnpj1 = row.get('Account.CNPJ__c')
+        cnpj2 = row.get('Account.FOZ_CNPJ__c')
+        valor = cnpj1 if pd.notna(cnpj1) and str(cnpj1).strip() else cnpj2
+        return manter_apenas_numeros(valor) if pd.notna(valor) else None
+    
+    # FONTE 2: Contact (uma linha por contato relacionado)
+    if not df_contatos_completos.empty:
+        df_c = df_contatos_completos.copy()
+        df_c['CNPJ_Limpo'] = df_c.apply(_cnpj_unificado, axis=1)
+        df_c = df_c.dropna(subset=['CNPJ_Limpo'])
+        for _, row in df_c.iterrows():
+            cnpj = row['CNPJ_Limpo']
+            nome = f"{str(row.get('FirstName') or '').strip()} {str(row.get('LastName') or '').strip()}".strip() or 'Sem nome'
+            cargo = str(row.get('Title') or '').strip()
+            for col, tipo in [('MobilePhone', 'Telefone'), ('Phone', 'Telefone'), ('Email', 'E-mail')]:
+                val = row.get(col)
+                if pd.notna(val) and str(val).strip():
+                    linhas_contatos.append({
+                        'CNPJ_Limpo': cnpj, 'Origem': 'Contatos (Contact)',
+                        'Nome_Contato': nome, 'Cargo': cargo,
+                        'Tipo': tipo, 'Valor': str(val).strip()
+                    })
+    
+    # FONTE 3: AccountContactRelation (contatos cross-account)
+    if not df_acr_completos.empty:
+        df_a = df_acr_completos.copy()
+        # Renomeia as colunas aninhadas Contact.X -> X para reuso do mesmo código
+        df_a = df_a.rename(columns={
+            'Contact.FirstName': 'FirstName', 'Contact.LastName': 'LastName',
+            'Contact.MobilePhone': 'MobilePhone', 'Contact.Phone': 'Phone',
+            'Contact.Email': 'Email', 'Contact.Title': 'Title',
+            'Contact.LastModifiedDate': 'LastModifiedDate'
+        })
+        df_a['CNPJ_Limpo'] = df_a.apply(_cnpj_unificado, axis=1)
+        df_a = df_a.dropna(subset=['CNPJ_Limpo'])
+        for _, row in df_a.iterrows():
+            cnpj = row['CNPJ_Limpo']
+            nome = f"{str(row.get('FirstName') or '').strip()} {str(row.get('LastName') or '').strip()}".strip() or 'Sem nome'
+            cargo = str(row.get('Title') or '').strip()
+            for col, tipo in [('MobilePhone', 'Telefone'), ('Phone', 'Telefone'), ('Email', 'E-mail')]:
+                val = row.get(col)
+                if pd.notna(val) and str(val).strip():
+                    linhas_contatos.append({
+                        'CNPJ_Limpo': cnpj, 'Origem': 'Contatos (ACR)',
+                        'Nome_Contato': nome, 'Cargo': cargo,
+                        'Tipo': tipo, 'Valor': str(val).strip()
+                    })
+    
+    df_contatos_long = pd.DataFrame(linhas_contatos)
+    if not df_contatos_long.empty:
+        # Remove duplicatas exatas (mesmo CNPJ + mesmo Valor + mesmo Tipo + mesma Origem)
+        df_contatos_long = df_contatos_long.drop_duplicates(
+            subset=['CNPJ_Limpo', 'Tipo', 'Valor', 'Origem'], keep='first'
+        ).reset_index(drop=True)
+    
     # Metadados úteis para a UI
     df.attrs['timestamp_carga'] = hoje.strftime('%d/%m/%Y %H:%M:%S')
     df.attrs['falhas_parse_data'] = falhas_parse_data
     df.attrs['total_registros'] = len(df)
+    df.attrs['contatos_long'] = df_contatos_long
         
     return df
 
@@ -709,12 +838,13 @@ if erro_arquivos_estaveis and not prestador_mapeado:
 # ==========================================
 # 8. RENDERIZAÇÃO DAS ABAS
 # ==========================================
-aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_hist, aba_desconsiderados, aba_sem_cobertura = st.tabs([
+aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_hist, aba_desconsiderados, aba_sem_cobertura = st.tabs([
     "📊 Visão Executiva", 
     "🏢 Visão por Franquias", 
     "⚖️ Atraso vs Capacidade",
     "📅 Capacidade Diária",
     "✉️ Mailing Acionável",
+    "🎯 M0",
     "📸 Fotografia Histórica",
     "🚫 Desconsiderados",
     "📍 Sem Cobertura de CEP"
@@ -1139,16 +1269,89 @@ with aba_mailing:
                 # 3. Mantém apenas os clientes cujo rank é menor que a capacidade disponível
                 df_mail_final = df_mail_filtrado[df_mail_filtrado['_rank'] < df_mail_filtrado['Capacidade Disponível']].drop(columns=['_rank']).reset_index(drop=True)
             
-                st.markdown(f"**{len(df_mail_final)} clientes selecionados e cortados cirurgicamente de acordo com o limite de vagas operacionais.**")
+                st.markdown(f"**{len(df_mail_final)} contratos selecionados e cortados cirurgicamente de acordo com o limite de vagas operacionais.**")
             
                 df_mail_final['Data_Vencimento_MP'] = df_mail_final['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
-                cols_mail = ['FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Status_Financeiro', 'Data_Vencimento_MP', 'Prestador_CEP', 'Capacidade Disponível']
-                df_exibicao_mail = df_mail_final[cols_mail].rename(columns={
-                    'FOZ_CodigoItem__c': 'Cód. Item', 'Account.Name': 'Cliente', 'Account.CNPJ__c': 'CNPJ',
-                    'Status_Financeiro': 'Status Fin.', 'Data_Vencimento_MP': 'Vencimento MP',
-                    'Prestador_CEP': 'Grade/Franquia', 'Capacidade Disponível': 'Vagas na Região'
-                }).sort_values(by='Vagas na Região', ascending=False)
-            
+                
+                # ----------------------------------------------------------
+                # EXPANSÃO POR CONTATOS: para cada contrato selecionado, gera N linhas
+                # (uma por contato disponível: telefone OU e-mail, em cada fonte).
+                # A regra de capacidade JÁ FOI APLICADA antes — aqui só adicionamos
+                # as informações de contato para acionamento.
+                # ----------------------------------------------------------
+                df_contatos_long = df_final.attrs.get('contatos_long', pd.DataFrame())
+                
+                # Base de colunas do contrato
+                cols_mail_base = [
+                    'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                    'Status_Financeiro', 'Data_Vencimento_MP', 'Dias_Atraso',
+                    'Prestador_CEP', 'Capacidade Disponível'
+                ]
+                df_mail_base_show = df_mail_final[cols_mail_base].copy()
+                
+                if df_contatos_long is not None and not df_contatos_long.empty:
+                    # Merge many-to-many: cada contrato pode virar várias linhas
+                    df_mail_expandido = pd.merge(
+                        df_mail_base_show,
+                        df_contatos_long,
+                        left_on='Account.CNPJ__c',
+                        right_on='CNPJ_Limpo',
+                        how='left'
+                    )
+                    # Para clientes SEM nenhum contato registrado, mantém uma linha única
+                    # com os campos de contato vazios (em vez de excluir o cliente do mailing)
+                    df_mail_expandido['Origem'] = df_mail_expandido['Origem'].fillna('— sem contato cadastrado —')
+                    df_mail_expandido['Tipo'] = df_mail_expandido['Tipo'].fillna('')
+                    df_mail_expandido['Valor'] = df_mail_expandido['Valor'].fillna('')
+                    df_mail_expandido['Nome_Contato'] = df_mail_expandido['Nome_Contato'].fillna('')
+                    df_mail_expandido['Cargo'] = df_mail_expandido['Cargo'].fillna('')
+                    
+                    df_exibicao_mail = df_mail_expandido[[
+                        'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                        'Status_Financeiro', 'Data_Vencimento_MP', 'Dias_Atraso',
+                        'Prestador_CEP', 'Capacidade Disponível',
+                        'Origem', 'Nome_Contato', 'Cargo', 'Tipo', 'Valor'
+                    ]].rename(columns={
+                        'FOZ_CodigoItem__c': 'Cód. Item',
+                        'Account.Name': 'Cliente',
+                        'Account.CNPJ__c': 'CNPJ',
+                        'Qtd_Contratos_Cliente': 'Qtd Contratos',
+                        'Status_Financeiro': 'Status Fin.',
+                        'Data_Vencimento_MP': 'Vencimento MP',
+                        'Dias_Atraso': 'Dias Atraso',
+                        'Prestador_CEP': 'Grade/Franquia',
+                        'Capacidade Disponível': 'Vagas na Região',
+                        'Origem': 'Origem Contato',
+                        'Nome_Contato': 'Nome do Contato',
+                        'Cargo': 'Cargo',
+                        'Tipo': 'Canal',
+                        'Valor': 'Telefone / E-mail'
+                    }).sort_values(by=['Grade/Franquia', 'Dias Atraso', 'Cód. Item', 'Canal'], 
+                                   ascending=[True, False, True, True])
+                else:
+                    # Não há dados de contatos: mailing fica como antes, sem colunas de contato
+                    df_exibicao_mail = df_mail_base_show.rename(columns={
+                        'FOZ_CodigoItem__c': 'Cód. Item', 'Account.Name': 'Cliente',
+                        'Account.CNPJ__c': 'CNPJ', 'Qtd_Contratos_Cliente': 'Qtd Contratos',
+                        'Status_Financeiro': 'Status Fin.', 'Data_Vencimento_MP': 'Vencimento MP',
+                        'Dias_Atraso': 'Dias Atraso',
+                        'Prestador_CEP': 'Grade/Franquia', 'Capacidade Disponível': 'Vagas na Região'
+                    }).sort_values(by='Vagas na Região', ascending=False)
+                
+                # Estatísticas do mailing expandido
+                qtd_contratos_unicos = df_mail_final['FOZ_CodigoItem__c'].nunique()
+                qtd_linhas = len(df_exibicao_mail)
+                qtd_clientes_sem_contato = 0
+                if 'Origem Contato' in df_exibicao_mail.columns:
+                    sem_contato = df_exibicao_mail[df_exibicao_mail['Origem Contato'] == '— sem contato cadastrado —']
+                    qtd_clientes_sem_contato = sem_contato['Cód. Item'].nunique()
+                
+                st.caption(
+                    f"📋 **{qtd_contratos_unicos}** contratos expandidos em **{qtd_linhas}** linhas "
+                    f"(uma por canal de contato disponível). "
+                    f"**{qtd_clientes_sem_contato}** contrato(s) sem nenhum contato cadastrado."
+                )
+                
                 st.dataframe(df_exibicao_mail, use_container_width=True, hide_index=True)
             
                 st.download_button(
@@ -1159,6 +1362,130 @@ with aba_mailing:
                 )
             else:
                 st.info("Não há clientes em atraso nas franquias que possuem capacidade livre neste momento.")
+
+# === ABA 6: M0 (CONTRATOS COM MP VENCENDO NO MÊS+1) ===
+with aba_m0:
+    st.markdown("### 🎯 M0 — Contratos com MP vencendo no próximo mês")
+    st.markdown(
+        "Lista todos os contratos da base ativa cuja **próxima MP vence no próximo mês civil** "
+        "em relação à data de hoje. **Visão crua**, sem a regra de 'atraso = vencimento + 1 mês' "
+        "aplicada nas outras abas. Use essa aba para se antecipar e atuar antes que esses contratos "
+        "entrem em atraso."
+    )
+    
+    # Calcula o mês-alvo: mês corrente + 1
+    hoje_br = datetime.now(FUSO_BR)
+    mes_corrente = hoje_br.month
+    ano_corrente = hoje_br.year
+    
+    # Mês seguinte (com virada de ano)
+    if mes_corrente == 12:
+        mes_alvo, ano_alvo = 1, ano_corrente + 1
+    else:
+        mes_alvo, ano_alvo = mes_corrente + 1, ano_corrente
+    
+    nomes_meses = {
+        1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho',
+        7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'
+    }
+    nome_mes_alvo = f"{nomes_meses[mes_alvo]}/{ano_alvo}"
+    
+    st.caption(f"📅 Mês de referência: **{nome_mes_alvo}** (hoje é {hoje_br.strftime('%d/%m/%Y')})")
+    
+    # Filtra contratos da base ativa cujo FOZ_DataProximaMP__c cai no mês-alvo.
+    # IMPORTANTE: aqui usamos a base completa (df_final) e NÃO df_ativos_reais,
+    # porque queremos a visão crua, incluindo contratos com OS de desinstalação se houver.
+    df_m0 = df_final[
+        (df_final['FOZ_DataProximaMP__c'].dt.month == mes_alvo) &
+        (df_final['FOZ_DataProximaMP__c'].dt.year == ano_alvo)
+    ].copy()
+    
+    if df_m0.empty:
+        st.info(f"Nenhum contrato com MP vencendo em {nome_mes_alvo}.")
+    else:
+        # KPIs no topo
+        total_m0 = len(df_m0)
+        adim_m0 = (df_m0['Status_Financeiro'] == StatusFin.ADIMPLENTE).sum()
+        inadim_m0 = (df_m0['Status_Financeiro'] == StatusFin.INADIMPLENTE).sum()
+        com_os_m0 = df_m0['Tem_OS_Aberta'].sum() if 'Tem_OS_Aberta' in df_m0.columns else 0
+        sem_os_m0 = total_m0 - com_os_m0
+        clientes_unicos = df_m0['Account.CNPJ__c'].nunique()
+        
+        with st.container(border=True):
+            st.markdown(f"#### 📊 Resumo M0 — {nome_mes_alvo}")
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            col1.metric("Contratos no M0", f"{total_m0:,}".replace(",", "."), "Vencendo no mês")
+            col2.metric("Clientes únicos", f"{clientes_unicos:,}".replace(",", "."))
+            col3.metric("Adimplentes", f"{adim_m0:,}".replace(",", "."))
+            col4.metric("Inadimplentes", f"{inadim_m0:,}".replace(",", "."))
+            col5.metric("Com OS aberta", f"{com_os_m0:,}".replace(",", "."), "Já em ação", delta_color="normal")
+            col6.metric("Sem OS aberta", f"{sem_os_m0:,}".replace(",", "."), "Pendente", delta_color="off")
+        
+        st.write("")
+        
+        # Filtros opcionais
+        col_filtro_fin, col_filtro_os, col_filtro_franq = st.columns(3)
+        with col_filtro_fin:
+            filtro_m0_fin = st.selectbox(
+                "Status Financeiro:",
+                ["Todos", "Apenas Adimplentes", "Apenas Inadimplentes"],
+                key="filtro_m0_fin"
+            )
+        with col_filtro_os:
+            filtro_m0_os = st.selectbox(
+                "OS Aberta:",
+                ["Todos", "Apenas COM OS aberta", "Apenas SEM OS aberta"],
+                key="filtro_m0_os"
+            )
+        with col_filtro_franq:
+            lista_franq_m0 = ["Todas"] + sorted([str(x) for x in df_m0['FOZ_EndFranquiaForm__c'].dropna().unique()])
+            filtro_m0_franq = st.selectbox("Franquia:", lista_franq_m0, key="filtro_m0_franq")
+        
+        df_m0_view = df_m0.copy()
+        if filtro_m0_fin == "Apenas Adimplentes":
+            df_m0_view = df_m0_view[df_m0_view['Status_Financeiro'] == StatusFin.ADIMPLENTE]
+        elif filtro_m0_fin == "Apenas Inadimplentes":
+            df_m0_view = df_m0_view[df_m0_view['Status_Financeiro'] == StatusFin.INADIMPLENTE]
+        if filtro_m0_os == "Apenas COM OS aberta":
+            df_m0_view = df_m0_view[df_m0_view['Tem_OS_Aberta'] == True]
+        elif filtro_m0_os == "Apenas SEM OS aberta":
+            df_m0_view = df_m0_view[df_m0_view['Tem_OS_Aberta'] == False]
+        if filtro_m0_franq != "Todas":
+            df_m0_view = df_m0_view[df_m0_view['FOZ_EndFranquiaForm__c'] == filtro_m0_franq]
+        
+        st.caption(f"Exibindo **{len(df_m0_view):,} contrato(s)** após filtros.".replace(",", "."))
+        
+        if not df_m0_view.empty:
+            df_m0_view['Vencimento MP'] = df_m0_view['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
+            df_m0_show = df_m0_view[[
+                'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                'Vencimento MP', 'FOZ_EndFranquiaForm__c', 'Status_Financeiro',
+                'Tem_OS_Aberta', 'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento'
+            ]].rename(columns={
+                'FOZ_CodigoItem__c': 'Cód. Item',
+                'Account.Name': 'Cliente',
+                'Account.CNPJ__c': 'CNPJ',
+                'Qtd_Contratos_Cliente': 'Qtd Contratos',
+                'FOZ_EndFranquiaForm__c': 'Franquia',
+                'Status_Financeiro': 'Status Fin.',
+                'Tem_OS_Aberta': 'Tem OS?',
+                'Numero_Caso': 'Nº OS',
+                'Tipo_Servico': 'Tipo de Serviço',
+                'Data_Agendamento': 'Data OS (Agendada)'
+            }).fillna({'Nº OS': '-', 'Tipo de Serviço': '-', 'Data OS (Agendada)': '-'})
+            df_m0_show['Tem OS?'] = df_m0_show['Tem OS?'].map({True: 'Sim', False: 'Não'})
+            
+            st.dataframe(df_m0_show, use_container_width=True, hide_index=True)
+            
+            st.download_button(
+                label="📥 Baixar M0 (Excel)",
+                data=df_para_excel_bytes(df_m0_show, 'M0'),
+                file_name=f"M0_{nomes_meses[mes_alvo].lower()}_{ano_alvo}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.ms-excel",
+                key="dl_m0"
+            )
+        else:
+            st.info("Nenhum contrato encontrado com os filtros aplicados.")
 
 # === ABA 6: HISTÓRICO (SNAPSHOT) ===
 with aba_hist:
