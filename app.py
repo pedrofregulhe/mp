@@ -839,7 +839,7 @@ if erro_arquivos_estaveis and not prestador_mapeado:
 # ==========================================
 # 8. RENDERIZAÇÃO DAS ABAS
 # ==========================================
-aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_hist, aba_desconsiderados, aba_sem_cobertura, aba_consulta = st.tabs([
+aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_hist, aba_sem_cobertura, aba_consulta = st.tabs([
     "📊 Visão Executiva", 
     "🏢 Visão por Franquias", 
     "⚖️ Atraso vs Capacidade",
@@ -847,7 +847,6 @@ aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, a
     "✉️ Mailing Acionável",
     "🎯 M0",
     "📸 Fotografia Histórica",
-    "🚫 Desconsiderados",
     "📍 Sem Cobertura de CEP",
     "🔍 Consulta de Asset"
 ])
@@ -1538,37 +1537,7 @@ with aba_hist:
         else:
             st.info("Nenhum histórico salvo ainda. Clique no botão ao lado para criar o primeiro registro.")
 
-# === ABA 7: DESCONSIDERADOS ===
-with aba_desconsiderados:
-    st.markdown("### 🚫 Contratos Desconsiderados")
-    st.markdown("Máquinas que teriam MP vencida, mas possuem OS de **Desinstalação** aberta.")
-    df_isentos = df_final[df_final['Atraso_Base'] == AtrasoBase.ISENTO].copy()
-    with st.container(border=True):
-        st.markdown("#### 🚫 Máquinas em Desinstalação")
-        col_kpi1, _ = st.columns([1, 6])
-        col_kpi1.metric("Máquinas Desconsideradas", len(df_isentos))
-    
-    if len(df_isentos) > 0:
-        df_isentos['Data_Vencimento_MP'] = df_isentos['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
-        df_exibicao_isentos = df_isentos[[
-            'FOZ_CodigoItem__c', 'Account.Name', 'SerialNumber', 'Status_MP_Real', 
-            'Data_Vencimento_MP', 'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento'
-        ]].rename(columns={
-            'FOZ_CodigoItem__c': 'Cód. Item', 'Account.Name': 'Cliente', 'SerialNumber': 'Nº Série',
-            'Status_MP_Real': 'Motivo', 'Data_Vencimento_MP': 'Vencimento Original',
-            'Numero_Caso': 'Nº OS', 'Tipo_Servico': 'Serviço', 'Data_Agendamento': 'Data OS'
-        }).fillna({'Data OS': '-'})
-        st.dataframe(df_exibicao_isentos, use_container_width=True, hide_index=True)
-        
-        st.download_button(
-            label="📥 Baixar desconsiderados (Excel)",
-            data=df_para_excel_bytes(df_exibicao_isentos, 'Desconsiderados'),
-            file_name=f"desconsiderados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.ms-excel",
-            key="dl_desconsiderados"
-        )
-
-# === ABA 8: SEM COBERTURA DE CEP ===
+# === ABA 7: SEM COBERTURA DE CEP ===
 with aba_sem_cobertura:
     st.markdown("### 📍 Contratos Sem Cobertura de CEP")
     st.markdown(
