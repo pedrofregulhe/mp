@@ -839,7 +839,7 @@ if erro_arquivos_estaveis and not prestador_mapeado:
 # ==========================================
 # 8. RENDERIZAÇÃO DAS ABAS
 # ==========================================
-aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_hist, aba_desconsiderados, aba_sem_cobertura = st.tabs([
+aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_hist, aba_desconsiderados, aba_sem_cobertura, aba_consulta = st.tabs([
     "📊 Visão Executiva", 
     "🏢 Visão por Franquias", 
     "⚖️ Atraso vs Capacidade",
@@ -848,7 +848,8 @@ aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, a
     "🎯 M0",
     "📸 Fotografia Histórica",
     "🚫 Desconsiderados",
-    "📍 Sem Cobertura de CEP"
+    "📍 Sem Cobertura de CEP",
+    "🔍 Consulta de Asset"
 ])
 
 # === ABA 1: DASHBOARD EXECUTIVO ===
@@ -1831,3 +1832,154 @@ with aba_sem_cobertura:
                     f"(Franquia + Grade), apenas a última prevalece — as anteriores são silenciosamente perdidas."
                 )
                 st.dataframe(pd.DataFrame(duplicatas_depara), use_container_width=True, hide_index=True)
+
+
+# === ABA 10: CONSULTA DE ASSET ===
+with aba_consulta:
+    st.markdown("### 🔍 Consulta Rápida de Asset")
+    st.markdown(
+        "Cole uma lista de **Códigos de Item** (um por linha, ou separados por vírgula/espaço) "
+        "para consultar o status completo de cada contrato na base atual."
+    )
+    
+    # Área de input
+    texto_codigos = st.text_area(
+        "Códigos de Item para consultar:",
+        placeholder="Exemplos:\n17181\n28553\n28554\n\nOu separados por vírgula: 17181, 28553, 28554",
+        height=150,
+        key="textarea_consulta_asset"
+    )
+    
+    col_btn, col_info = st.columns([1, 4])
+    with col_btn:
+        consultar = st.button("🔎 Consultar", type="primary", key="btn_consulta_asset")
+    
+    if consultar and texto_codigos.strip():
+        # Parse robusto: aceita quebras de linha, vírgulas, ponto-vírgula, tabs e espaços
+        codigos_brutos = re.split(r'[\n,;\t\s]+', texto_codigos.strip())
+        # Normaliza para string sem espaços e descarta vazios
+        codigos_buscados = [c.strip() for c in codigos_brutos if c.strip()]
+        # Remove duplicatas preservando ordem
+        codigos_buscados = list(dict.fromkeys(codigos_buscados))
+        
+        if not codigos_buscados:
+            st.warning("Nenhum código válido foi identificado no texto inserido.")
+        else:
+            # A comparação precisa ser robusta a tipos (alguns vêm como int, outros como str)
+            df_busca = df_final.copy()
+            df_busca['_codigo_str'] = df_busca['FOZ_CodigoItem__c'].astype(str).str.strip()
+            
+            # Identifica encontrados e não encontrados
+            df_encontrados = df_busca[df_busca['_codigo_str'].isin(codigos_buscados)].copy()
+            encontrados_set = set(df_encontrados['_codigo_str'].tolist())
+            nao_encontrados = [c for c in codigos_buscados if c not in encontrados_set]
+            
+            # Resumo da consulta
+            col_r1, col_r2, col_r3 = st.columns(3)
+            col_r1.metric("Códigos buscados", len(codigos_buscados))
+            col_r2.metric("Encontrados", len(df_encontrados), delta_color="normal")
+            col_r3.metric("Não encontrados", len(nao_encontrados), 
+                         "Inativos ou não existem" if nao_encontrados else "Todos OK", 
+                         delta_color="inverse" if nao_encontrados else "normal")
+            
+            # Lista os não encontrados
+            if nao_encontrados:
+                with st.expander(f"⚠️ {len(nao_encontrados)} código(s) não encontrado(s) na base ativa"):
+                    st.caption(
+                        "Estes códigos podem estar: (1) com Asset inativo no Salesforce; "
+                        "(2) digitados incorretamente; ou (3) não existem."
+                    )
+                    st.code("\n".join(nao_encontrados))
+            
+            st.markdown("---")
+            
+            if not df_encontrados.empty:
+                # Cruza com a tabela de telefones (limite de 5 telefones por contrato)
+                df_contatos_long = df_final.attrs.get('contatos_long', pd.DataFrame())
+                tel_por_cnpj = {}
+                if df_contatos_long is not None and not df_contatos_long.empty:
+                    df_tel = df_contatos_long[df_contatos_long['Tipo'] == 'Telefone'].copy()
+                    df_tel['_normalizado'] = df_tel['Valor'].astype(str).str.replace(r'\D', '', regex=True)
+                    df_tel = df_tel[df_tel['_normalizado'].str.len() >= 8]
+                    df_tel = df_tel.drop_duplicates(subset=['CNPJ_Limpo', '_normalizado'], keep='first')
+                    for cnpj, grupo in df_tel.groupby('CNPJ_Limpo'):
+                        tel_por_cnpj[cnpj] = grupo['Valor'].tolist()
+                
+                # Define quantas colunas de telefone (até 5, para não poluir a tabela)
+                MAX_TEL_CONSULTA = 5
+                max_tel = 0
+                for cnpj in df_encontrados['Account.CNPJ__c']:
+                    max_tel = max(max_tel, min(len(tel_por_cnpj.get(cnpj, [])), MAX_TEL_CONSULTA))
+                
+                # Cria colunas de telefone
+                for i in range(max_tel):
+                    col_nome = f"Telefone {i+1:02d}"
+                    df_encontrados[col_nome] = df_encontrados['Account.CNPJ__c'].apply(
+                        lambda c: tel_por_cnpj.get(c, [])[i] if i < len(tel_por_cnpj.get(c, [])) else ''
+                    )
+                
+                # Formata datas para exibição
+                df_encontrados['Vencimento MP'] = df_encontrados['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
+                df_encontrados['Última MP'] = pd.to_datetime(df_encontrados.get('FOZ_DataUltimaMP__c'), errors='coerce').dt.strftime('%d/%m/%Y')
+                df_encontrados['Tem OS Aberta?'] = df_encontrados['Tem_OS_Aberta'].map({True: 'Sim', False: 'Não'})
+                
+                # Trata valores nulos visíveis
+                df_encontrados['Última MP'] = df_encontrados['Última MP'].fillna('—')
+                df_encontrados['Numero_Caso'] = df_encontrados['Numero_Caso'].fillna('—')
+                df_encontrados['Tipo_Servico'] = df_encontrados['Tipo_Servico'].fillna('—')
+                df_encontrados['Data_Agendamento'] = df_encontrados['Data_Agendamento'].fillna('—')
+                
+                # Monta a tabela final na ordem que faz sentido para consulta operacional
+                cols_consulta = [
+                    'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                    'Classificacao', 'Status_Financeiro', 'FOZ_EndFranquiaForm__c', 'CEP_Limpo',
+                    'Status_MP_Real', 'AGING_MP', 'Dias_Atraso', 
+                    'Vencimento MP', 'Última MP',
+                    'Tem OS Aberta?', 'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento',
+                    'SerialNumber'
+                ] + [f"Telefone {i+1:02d}" for i in range(max_tel)]
+                
+                # Garante que todas as colunas existam (algumas podem não estar presentes em situações específicas)
+                cols_existentes = [c for c in cols_consulta if c in df_encontrados.columns]
+                
+                df_show = df_encontrados[cols_existentes].rename(columns={
+                    'FOZ_CodigoItem__c': 'Cód. Item',
+                    'Account.Name': 'Cliente',
+                    'Account.CNPJ__c': 'CNPJ',
+                    'Qtd_Contratos_Cliente': 'Qtd Contratos',
+                    'Classificacao': 'Classificação',
+                    'Status_Financeiro': 'Status Fin.',
+                    'FOZ_EndFranquiaForm__c': 'Franquia',
+                    'CEP_Limpo': 'CEP',
+                    'Status_MP_Real': 'Status MP',
+                    'AGING_MP': 'Aging',
+                    'Dias_Atraso': 'Dias Atraso',
+                    'Numero_Caso': 'Nº OS',
+                    'Tipo_Servico': 'Tipo de Serviço',
+                    'Data_Agendamento': 'Data OS Agendada',
+                    'SerialNumber': 'Nº de Série'
+                })
+                
+                # Preserva a ordem dos códigos colados (útil quando o usuário tem lista priorizada)
+                ordem_dict = {c: i for i, c in enumerate(codigos_buscados)}
+                df_show['_ordem'] = df_show['Cód. Item'].astype(str).map(ordem_dict)
+                df_show = df_show.sort_values('_ordem').drop(columns=['_ordem']).reset_index(drop=True)
+                
+                st.markdown(f"**📋 {len(df_show)} contrato(s) encontrado(s)**")
+                st.dataframe(df_show, use_container_width=True, hide_index=True)
+                
+                st.download_button(
+                    label="📥 Baixar resultado da consulta (Excel)",
+                    data=df_para_excel_bytes(df_show, 'Consulta_Asset'),
+                    file_name=f"consulta_asset_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.ms-excel",
+                    key="dl_consulta_asset"
+                )
+    elif consultar:
+        st.warning("Cole pelo menos um código de item para consultar.")
+    else:
+        st.info(
+            "💡 **Dica:** o campo aceita códigos colados de uma coluna do Excel "
+            "(uma linha por código), separados por vírgula, ou misturados. "
+            "Códigos duplicados são consolidados automaticamente."
+        )
