@@ -313,7 +313,23 @@ def carregar_dados_completos():
     mask_notnull = df['FOZ_DataProximaMP__c'].notnull()
     df['Meses_Diff'] = np.nan
     df.loc[mask_notnull, 'Meses_Diff'] = (hoje_limpo.year - df.loc[mask_notnull, 'Ano_MP']) * 12 + (hoje_limpo.month - df.loc[mask_notnull, 'Mes_MP'])
-    df['Atraso_Base'] = np.where(df['Meses_Diff'] >= 1, AtrasoBase.ATRASADO, AtrasoBase.EM_DIA)
+    
+    # -----------------------------------------------------------------
+    # REGRA DE NEGÓCIO (alinhada com o time de BI):
+    # Um contrato só é considerado "ATRASADO" quando a próxima MP venceu há
+    # MAIS DE 1 MÊS COMPLETO (dia a dia), não apenas pela diferença de mês civil.
+    # Equivale ao SQL: FOZ_DataProximaMP__c < ADD_MONTHS(TODAY(), -1)
+    # 
+    # Exemplo: hoje = 14/05/2026, próxima MP = 20/04/2026
+    #   - Pela regra antiga (mês civil): 1 mês de diff → ATRASADO ❌
+    #   - Pela regra nova (mês completo): faltam 6 dias para completar 1 mês → EM DIA ✓
+    # -----------------------------------------------------------------
+    limite_carencia = hoje_limpo - pd.DateOffset(months=1)
+    df['Atraso_Base'] = np.where(
+        df['FOZ_DataProximaMP__c'] < limite_carencia,
+        AtrasoBase.ATRASADO,
+        AtrasoBase.EM_DIA
+    )
     
     mask_desinstalacao = (df['Atraso_Base'] == AtrasoBase.ATRASADO) & (df['Tipo_Servico'].str.contains('DESINSTALA', case=False, na=False))
     df.loc[mask_desinstalacao, 'Atraso_Base'] = AtrasoBase.ISENTO
