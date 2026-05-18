@@ -1347,6 +1347,155 @@ with aba_mailing:
                     file_name=f"Mailing_Agendamento_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.ms-excel"
                 )
+                
+                # ============================================================
+                # EXTRATOS DOS NÃO ACIONADOS — clientes em atraso que ficaram
+                # de fora do mailing por restrição de capacidade. Útil para:
+                #  1) Justificar pedidos de aumento de capacidade com dados
+                #  2) Identificar franquias críticas (alta demanda, sem vaga)
+                #  3) Garantir que ninguém é esquecido na operação
+                # ============================================================
+                st.markdown("---")
+                st.markdown("### 🚫 Contratos NÃO acionados (sem capacidade de agendamento)")
+                st.markdown(
+                    "Contratos atrasados e elegíveis para contato, **mas que ficaram fora do mailing** "
+                    "porque a franquia responsável não tem vagas suficientes. Use este extrato para "
+                    "dimensionar pedidos de aumento de capacidade e identificar regiões críticas."
+                )
+                
+                # GRUPO 1: Excedente — franquia TEM vagas, mas o contrato ficou após o corte
+                # (ex.: franquia com 20 vagas e 50 atrasados → 30 excedentes)
+                # GRUPO 2: Franquia sem vagas — capacidade zero na região
+                # 
+                # Para identificar os dois grupos, refazemos o cruzamento Atrasados × Capacidade
+                # a partir de df_mail_base (todos os atrasados elegíveis, independente da capacidade)
+                df_excedente = pd.merge(
+                    df_mail_base,
+                    capacidade_agrupada,
+                    left_on='Prestador_CEP',
+                    right_on='Prestador de Serviço',
+                    how='left'
+                )
+                df_excedente['Capacidade Disponível'] = df_excedente['Capacidade Disponível'].fillna(0).astype(int)
+                
+                # Separa em dois grupos
+                df_grupo1 = df_excedente[df_excedente['Capacidade Disponível'] > 0].copy()  # franquia com vaga
+                df_grupo2 = df_excedente[df_excedente['Capacidade Disponível'] == 0].copy()  # sem vaga
+                
+                # GRUPO 1: refaz o ranking e pega quem está APÓS o corte
+                if not df_grupo1.empty:
+                    df_grupo1 = df_grupo1.sort_values(
+                        by=['Prestador_CEP', 'Dias_Atraso', 'FOZ_CodigoItem__c'],
+                        ascending=[True, False, True]
+                    )
+                    df_grupo1['_rank'] = df_grupo1.groupby('Prestador_CEP').cumcount()
+                    df_excedente_capacidade = df_grupo1[
+                        df_grupo1['_rank'] >= df_grupo1['Capacidade Disponível']
+                    ].drop(columns=['_rank']).copy()
+                else:
+                    df_excedente_capacidade = pd.DataFrame()
+                
+                # GRUPO 2: franquia sem nenhuma vaga
+                df_sem_vagas = df_grupo2.copy()
+                
+                # Concatena os dois grupos com um campo identificador
+                if not df_excedente_capacidade.empty:
+                    df_excedente_capacidade['Motivo_Nao_Acionamento'] = 'Excedente de capacidade'
+                if not df_sem_vagas.empty:
+                    df_sem_vagas['Motivo_Nao_Acionamento'] = 'Franquia sem vagas'
+                
+                df_nao_acionados = pd.concat(
+                    [df_excedente_capacidade, df_sem_vagas],
+                    ignore_index=True
+                ) if (not df_excedente_capacidade.empty or not df_sem_vagas.empty) else pd.DataFrame()
+                
+                if df_nao_acionados.empty:
+                    st.success(
+                        "✅ Excelente! Todos os contratos atrasados elegíveis estão sendo acionados — "
+                        "a capacidade atual da rede atende 100% da demanda neste segmento financeiro."
+                    )
+                else:
+                    # KPIs do extrato
+                    qtd_excedente = len(df_excedente_capacidade) if not df_excedente_capacidade.empty else 0
+                    qtd_sem_vagas = len(df_sem_vagas) if not df_sem_vagas.empty else 0
+                    qtd_total_nao_acionados = qtd_excedente + qtd_sem_vagas
+                    qtd_franquias_afetadas = df_nao_acionados['Prestador_CEP'].nunique()
+                    
+                    col_k1, col_k2, col_k3, col_k4 = st.columns(4)
+                    col_k1.metric("Total não acionados", f"{qtd_total_nao_acionados:,}".replace(",", "."), 
+                                 "Contratos perdidos no recorte", delta_color="inverse")
+                    col_k2.metric("Excedente de capacidade", f"{qtd_excedente:,}".replace(",", "."),
+                                 "Franquia tem vaga, mas não p/ todos", delta_color="off")
+                    col_k3.metric("Franquia sem vagas", f"{qtd_sem_vagas:,}".replace(",", "."),
+                                 "Zero capacidade na região", delta_color="inverse")
+                    col_k4.metric("Franquias afetadas", f"{qtd_franquias_afetadas:,}".replace(",", "."))
+                    
+                    st.write("")
+                    
+                    # Resumo por franquia (priorização para aumento de capacidade)
+                    st.markdown("**📊 Resumo por franquia (priorize aumento de capacidade onde o volume é maior)**")
+                    df_nao_acionados['Prestador_CEP_Display'] = df_nao_acionados['Prestador_CEP'].fillna('⚠️ SEM COBERTURA DE CEP')
+                    resumo_franq = df_nao_acionados.groupby(['Prestador_CEP_Display', 'Motivo_Nao_Acionamento']).size().unstack(fill_value=0)
+                    
+                    # Garante as duas colunas (mesmo se um dos motivos estiver vazio)
+                    for col in ['Excedente de capacidade', 'Franquia sem vagas']:
+                        if col not in resumo_franq.columns:
+                            resumo_franq[col] = 0
+                    resumo_franq['Total não acionados'] = resumo_franq.sum(axis=1)
+                    resumo_franq = resumo_franq.sort_values('Total não acionados', ascending=False).reset_index()
+                    resumo_franq.columns = ['Franquia', 'Excedente', 'Sem Vagas', 'Total']
+                    
+                    st.dataframe(
+                        resumo_franq.style.background_gradient(cmap='Reds', subset=['Total']),
+                        use_container_width=True, hide_index=True
+                    )
+                    
+                    st.write("")
+                    
+                    # Extrato detalhado (mesmo formato do mailing principal, mas com motivo)
+                    st.markdown("**📋 Extrato detalhado**")
+                    df_nao_acionados['Vencimento MP'] = df_nao_acionados['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
+                    
+                    # Reaproveita a lógica de telefones do mailing principal
+                    max_tel_na = 0
+                    for cnpj in df_nao_acionados['Account.CNPJ__c']:
+                        max_tel_na = max(max_tel_na, len(tel_por_cnpj.get(cnpj, [])))
+                    
+                    for i in range(max_tel_na):
+                        col_nome = f"Telefone {i+1:02d}"
+                        df_nao_acionados[col_nome] = df_nao_acionados['Account.CNPJ__c'].apply(
+                            lambda c: tel_por_cnpj.get(c, [])[i] if i < len(tel_por_cnpj.get(c, [])) else ''
+                        )
+                    
+                    cols_na = [
+                        'Motivo_Nao_Acionamento',
+                        'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                        'Status_Financeiro', 'Vencimento MP', 'Dias_Atraso',
+                        'Prestador_CEP_Display', 'Capacidade Disponível'
+                    ] + [f"Telefone {i+1:02d}" for i in range(max_tel_na)]
+                    
+                    df_exibicao_na = df_nao_acionados[cols_na].rename(columns={
+                        'Motivo_Nao_Acionamento': 'Motivo',
+                        'FOZ_CodigoItem__c': 'Cód. Item',
+                        'Account.Name': 'Cliente',
+                        'Account.CNPJ__c': 'CNPJ',
+                        'Qtd_Contratos_Cliente': 'Qtd Contratos',
+                        'Status_Financeiro': 'Status Fin.',
+                        'Dias_Atraso': 'Dias Atraso',
+                        'Prestador_CEP_Display': 'Grade/Franquia',
+                        'Capacidade Disponível': 'Vagas na Região'
+                    }).sort_values(by=['Motivo', 'Grade/Franquia', 'Dias Atraso'],
+                                   ascending=[True, True, False])
+                    
+                    st.dataframe(df_exibicao_na, use_container_width=True, hide_index=True)
+                    
+                    st.download_button(
+                        label="📥 Baixar Não Acionados (Excel)",
+                        data=df_para_excel_bytes(df_exibicao_na, 'Nao_Acionados'),
+                        file_name=f"Nao_Acionados_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.ms-excel",
+                        key="dl_nao_acionados"
+                    )
             else:
                 st.info("Não há clientes em atraso nas franquias que possuem capacidade livre neste momento.")
 
