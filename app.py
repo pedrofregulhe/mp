@@ -29,6 +29,7 @@ class StatusFin:
     INADIMPLENTE = 'Inadimplente'
 
 ARQUIVO_HISTORICO = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'historico_backlog_mp.csv')
+ARQUIVO_FUNIL = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'historico_funil.csv')
 FUSO_BR = pytz.timezone('America/Sao_Paulo')
 
 # ==========================================
@@ -237,12 +238,25 @@ def carregar_dados_completos():
     WHERE (Account.CNPJ__c != null OR Account.FOZ_CNPJ__c != null)
       AND (Contact.MobilePhone != null OR Contact.Phone != null)
     """
+    # OS de Manutenção Preventiva — usada para o Funil mensal da Fotografia Histórica.
+    # Traz a data de criação da OS (CreatedDate, quando foi agendada) e o status do Caso
+    # (para identificar baixas "Executado com Sucesso"). Considera apenas OS de MP.
+    query_os_mp = """
+    SELECT 
+        Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.CaseNumber, Case.Status, Case.CreatedDate,
+        Case.Account.FOZ_Classificacao__c, Case.Account.FOZ_StatusPosicaoFinanceira__c,
+        FOZ_Tipo_de_Servico__c, FOZ_Agendado_Data_Periodo__c
+    FROM WorkOrder 
+    WHERE Case.Type = 'OS' 
+      AND FOZ_Tipo_de_Servico__c LIKE '%MP%'
+    """
     
     registros_ativos = sf.query_all(query_ativos).get('records', [])
     registros_contatos = sf.query_all(query_contatos).get('records', [])
     registros_os = sf.query_all(query_os).get('records', [])
     registros_contatos_completos = sf.query_all(query_contatos_completos).get('records', [])
     registros_acr_completos = sf.query_all(query_acr_completos).get('records', [])
+    registros_os_mp = sf.query_all(query_os_mp).get('records', [])
     
     df_ativos = pd.json_normalize(registros_ativos)
     df_contatos = pd.json_normalize(registros_contatos)
@@ -482,11 +496,39 @@ def carregar_dados_completos():
     else:
         df_contatos_long = pd.DataFrame(columns=['CNPJ_Limpo', 'Valor', 'Tipo'])
     
+    # ==========================================
+    # OS DE MP (para o Funil mensal)
+    # ==========================================
+    # Monta um DataFrame com as OS de manutenção preventiva, normalizando a data de
+    # criação (CreatedDate) para identificar em qual mês a OS foi agendada, e o status
+    # do caso para identificar baixas com sucesso.
+    linhas_os_mp = []
+    for reg in registros_os_mp:
+        caso = reg.get('Case') or {}
+        asset = caso.get('FOZ_Asset__r') or {}
+        conta = caso.get('Account') or {}
+        created = caso.get('CreatedDate')
+        linhas_os_mp.append({
+            'CodigoItem': asset.get('FOZ_CodigoItem__c'),
+            'CaseNumber': caso.get('CaseNumber'),
+            'Status_Caso': caso.get('Status'),
+            'CreatedDate': created,
+            'Classificacao': conta.get('FOZ_Classificacao__c'),
+            'Status_Posicao_Fin': conta.get('FOZ_StatusPosicaoFinanceira__c'),
+        })
+    df_os_mp = pd.DataFrame(linhas_os_mp)
+    del linhas_os_mp, registros_os_mp
+    if not df_os_mp.empty:
+        df_os_mp['CreatedDate'] = pd.to_datetime(df_os_mp['CreatedDate'], errors='coerce').dt.tz_localize(None)
+        df_os_mp['Ano_Criacao'] = df_os_mp['CreatedDate'].dt.year
+        df_os_mp['Mes_Criacao'] = df_os_mp['CreatedDate'].dt.month
+    
     # Metadados úteis para a UI
     df.attrs['timestamp_carga'] = hoje.strftime('%d/%m/%Y %H:%M:%S')
     df.attrs['falhas_parse_data'] = falhas_parse_data
     df.attrs['total_registros'] = len(df)
     df.attrs['contatos_long'] = df_contatos_long
+    df.attrs['os_mp'] = df_os_mp
         
     return df
 
@@ -1685,6 +1727,236 @@ with aba_hist:
                 st.error(f"Erro ao ler histórico: {e}")
         else:
             st.info("Nenhum histórico salvo ainda. Clique no botão ao lado para criar o primeiro registro.")
+    
+    # ============================================================
+    # FUNIL DE CONVERSÃO MENSAL
+    # ============================================================
+    st.markdown("---")
+    st.markdown("### 🔻 Funil de Conversão Mensal")
+    st.markdown(
+        "Acompanha a jornada do atraso ao longo do mês: do total que iniciou o mês em atraso, "
+        "quantos estavam aptos para acionamento, quantos tiveram MP agendada e quantos tiveram "
+        "a OS de MP baixada com sucesso. **Capture o retrato no início de cada mês** para construir a série."
+    )
+    
+    hoje_funil = datetime.now(FUSO_BR)
+    mes_funil = hoje_funil.month
+    ano_funil = hoje_funil.year
+    nomes_meses_funil = {
+        1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho',
+        7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'
+    }
+    rotulo_mes_funil = f"{nomes_meses_funil[mes_funil]}/{ano_funil}"
+    
+    # ---- CÁLCULO DAS 4 MÉTRICAS DO FUNIL (para o mês corrente) ----
+    # A captura gera uma linha por combinação (Classificação x Status Financeiro),
+    # permitindo que os filtros da visualização funcionem depois.
+    df_os_mp = df_final.attrs.get('os_mp', pd.DataFrame())
+    
+    # Base do funil: contratos atrasados (X)
+    df_funil_base = df_ativos_reais[df_ativos_reais['Atraso_Base'] == AtrasoBase.ATRASADO].copy()
+    
+    # OS de MP criadas DENTRO do mês corrente (mês fechado)
+    if not df_os_mp.empty:
+        df_os_mes = df_os_mp[
+            (df_os_mp['Mes_Criacao'] == mes_funil) & (df_os_mp['Ano_Criacao'] == ano_funil)
+        ].copy()
+    else:
+        df_os_mes = pd.DataFrame(columns=['CodigoItem', 'Status_Caso'])
+    
+    # Conjuntos de códigos para os cruzamentos
+    cod_os_agendadas = set(df_os_mes['CodigoItem'].dropna().astype(str))
+    cod_os_baixadas = set(
+        df_os_mes[df_os_mes['Status_Caso'] == 'Executado com Sucesso']['CodigoItem'].dropna().astype(str)
+    )
+    
+    def calcular_funil(df_segmento):
+        """Calcula X, Y, Z, W para um subconjunto de contratos atrasados."""
+        cods = df_segmento['FOZ_CodigoItem__c'].astype(str)
+        X = len(df_segmento)  # iniciaram o mês em atraso
+        Y = int((df_segmento['Tem_OS_Aberta'] == False).sum())  # aptos (sem OS aberta)
+        Z = int(cods.isin(cod_os_agendadas).sum())  # tiveram MP agendada no mês
+        W = int(cods.isin(cod_os_baixadas).sum())  # OS de MP baixada com sucesso
+        return X, Y, Z, W
+    
+    # Monta o registro do mês quebrado por Classificação x Status Financeiro
+    linhas_funil_mes = []
+    for classif in df_funil_base['Classificacao'].dropna().unique():
+        for status_fin in df_funil_base['Status_Financeiro'].dropna().unique():
+            sub = df_funil_base[
+                (df_funil_base['Classificacao'] == classif) &
+                (df_funil_base['Status_Financeiro'] == status_fin)
+            ]
+            if len(sub) == 0:
+                continue
+            X, Y, Z, W = calcular_funil(sub)
+            linhas_funil_mes.append({
+                'Mes_Referencia': rotulo_mes_funil,
+                'Ano': ano_funil,
+                'Mes': mes_funil,
+                'Classificacao': classif,
+                'Status_Financeiro': status_fin,
+                'X_Iniciaram_Atraso': X,
+                'Y_Aptos_Acionamento': Y,
+                'Z_MP_Agendada': Z,
+                'W_OS_Baixada': W,
+                'Data_Captura': hoje_funil.strftime('%d/%m/%Y %H:%M')
+            })
+    df_funil_mes = pd.DataFrame(linhas_funil_mes)
+    
+    # ---- BOTÃO DE CAPTURA ----
+    col_cap1, col_cap2 = st.columns([1, 3])
+    with col_cap1:
+        capturar_funil = st.button("📸 Capturar Funil do Mês", type="primary", key="btn_capturar_funil")
+    with col_cap2:
+        st.caption(
+            f"Mês de referência: **{rotulo_mes_funil}**. A captura consolida o retrato atual "
+            f"e gera um arquivo para download."
+        )
+    
+    if capturar_funil:
+        if df_funil_mes.empty:
+            st.warning("Não há contratos em atraso para capturar neste mês.")
+        else:
+            # Junta com o histórico existente (lê da pasta se houver)
+            if os.path.exists(ARQUIVO_FUNIL):
+                try:
+                    df_funil_hist = pd.read_csv(ARQUIVO_FUNIL)
+                    # Remove qualquer captura anterior do MESMO mês (recaptura substitui)
+                    df_funil_hist = df_funil_hist[df_funil_hist['Mes_Referencia'] != rotulo_mes_funil]
+                    df_funil_atualizado = pd.concat([df_funil_hist, df_funil_mes], ignore_index=True)
+                except Exception:
+                    df_funil_atualizado = df_funil_mes
+            else:
+                df_funil_atualizado = df_funil_mes
+            
+            st.success(
+                f"✅ Funil de {rotulo_mes_funil} capturado! "
+                f"Baixe o arquivo abaixo e coloque na pasta raiz do projeto (substituindo o anterior)."
+            )
+            
+            # Oferece o CSV atualizado para download
+            csv_funil = df_funil_atualizado.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Baixar historico_funil.csv (colocar na pasta do projeto)",
+                data=csv_funil,
+                file_name="historico_funil.csv",
+                mime="text/csv",
+                key="dl_funil_csv"
+            )
+    
+    # ---- VISUALIZAÇÃO DO FUNIL ----
+    st.markdown("#### 📊 Visualização")
+    
+    if not os.path.exists(ARQUIVO_FUNIL):
+        st.info(
+            "Nenhum funil capturado ainda. Clique em **Capturar Funil do Mês** acima, "
+            "baixe o arquivo `historico_funil.csv` e suba para a pasta do projeto. "
+            "A partir daí, os meses capturados aparecerão aqui."
+        )
+    else:
+        try:
+            df_funil_view = pd.read_csv(ARQUIVO_FUNIL)
+            
+            # Filtros: mês, classificação, status financeiro
+            col_f1, col_f2, col_f3 = st.columns(3)
+            with col_f1:
+                meses_disp = df_funil_view['Mes_Referencia'].drop_duplicates().tolist()
+                # Ordena cronologicamente
+                meses_ord = sorted(meses_disp, key=lambda m: (
+                    df_funil_view[df_funil_view['Mes_Referencia'] == m]['Ano'].iloc[0],
+                    df_funil_view[df_funil_view['Mes_Referencia'] == m]['Mes'].iloc[0]
+                ))
+                mes_sel = st.selectbox("Mês:", meses_ord, index=len(meses_ord)-1, key="funil_mes")
+            with col_f2:
+                classifs = ["(Todas)"] + sorted(df_funil_view['Classificacao'].dropna().unique().tolist())
+                classif_sel = st.selectbox("Tipo de Cliente:", classifs, key="funil_classif")
+            with col_f3:
+                status_fins = ["(Todos)"] + sorted(df_funil_view['Status_Financeiro'].dropna().unique().tolist())
+                status_sel = st.selectbox("Status Financeiro:", status_fins, key="funil_status")
+            
+            # Aplica filtros
+            df_fv = df_funil_view[df_funil_view['Mes_Referencia'] == mes_sel].copy()
+            if classif_sel != "(Todas)":
+                df_fv = df_fv[df_fv['Classificacao'] == classif_sel]
+            if status_sel != "(Todos)":
+                df_fv = df_fv[df_fv['Status_Financeiro'] == status_sel]
+            
+            if df_fv.empty:
+                st.warning("Nenhum dado para os filtros selecionados.")
+            else:
+                # Soma as métricas do recorte
+                X = int(df_fv['X_Iniciaram_Atraso'].sum())
+                Y = int(df_fv['Y_Aptos_Acionamento'].sum())
+                Z = int(df_fv['Z_MP_Agendada'].sum())
+                W = int(df_fv['W_OS_Baixada'].sum())
+                
+                # Gráfico de funil
+                etapas = [
+                    'Iniciaram o mês em atraso',
+                    'Aptos para acionamento',
+                    'MP agendada',
+                    'OS de MP baixada com sucesso'
+                ]
+                valores = [X, Y, Z, W]
+                
+                fig_funil = go.Figure(go.Funnel(
+                    y=etapas,
+                    x=valores,
+                    textposition="inside",
+                    textinfo="value+percent initial",
+                    marker={"color": ["#1f77b4", "#17a2b8", "#ffc107", "#28a745"]},
+                    connector={"line": {"color": "#cbd5e1", "width": 1}}
+                ))
+                fig_funil.update_layout(
+                    title=f"Funil de Conversão — {mes_sel}",
+                    margin={"t": 50, "b": 20, "l": 20, "r": 20},
+                    height=400
+                )
+                st.plotly_chart(fig_funil, use_container_width=True)
+                
+                # KPIs de conversão entre etapas
+                col_c1, col_c2, col_c3 = st.columns(3)
+                conv_xy = (Y / X * 100) if X > 0 else 0
+                conv_yz = (Z / Y * 100) if Y > 0 else 0
+                conv_zw = (W / Z * 100) if Z > 0 else 0
+                col_c1.metric("Atraso → Aptos", f"{conv_xy:.1f}%", f"{Y} de {X}")
+                col_c2.metric("Aptos → Agendados", f"{conv_yz:.1f}%", f"{Z} de {Y}")
+                col_c3.metric("Agendados → Baixados", f"{conv_zw:.1f}%", f"{W} de {Z}")
+                
+                # Evolução mês a mês (se houver mais de um mês capturado)
+                if len(meses_ord) > 1:
+                    st.markdown("#### 📈 Evolução mês a mês")
+                    df_evol = df_funil_view.copy()
+                    if classif_sel != "(Todas)":
+                        df_evol = df_evol[df_evol['Classificacao'] == classif_sel]
+                    if status_sel != "(Todos)":
+                        df_evol = df_evol[df_evol['Status_Financeiro'] == status_sel]
+                    
+                    df_evol_agg = df_evol.groupby(['Mes_Referencia', 'Ano', 'Mes']).agg(
+                        X=('X_Iniciaram_Atraso', 'sum'),
+                        Y=('Y_Aptos_Acionamento', 'sum'),
+                        Z=('Z_MP_Agendada', 'sum'),
+                        W=('W_OS_Baixada', 'sum'),
+                    ).reset_index().sort_values(['Ano', 'Mes'])
+                    
+                    df_evol_plot = df_evol_agg.rename(columns={
+                        'X': 'Iniciaram atraso', 'Y': 'Aptos',
+                        'Z': 'MP agendada', 'W': 'OS baixada'
+                    })
+                    fig_evol = px.line(
+                        df_evol_plot, x='Mes_Referencia',
+                        y=['Iniciaram atraso', 'Aptos', 'MP agendada', 'OS baixada'],
+                        markers=True, title="Evolução das etapas do funil",
+                        color_discrete_map={
+                            'Iniciaram atraso': '#1f77b4', 'Aptos': '#17a2b8',
+                            'MP agendada': '#ffc107', 'OS baixada': '#28a745'
+                        }
+                    )
+                    fig_evol.update_layout(yaxis_title="Contratos", xaxis_title="Mês")
+                    st.plotly_chart(fig_evol, use_container_width=True)
+        except Exception as e:
+            st.error(f"Erro ao ler o histórico do funil: {e}")
 
 # === ABA 7: SEM COBERTURA DE CEP ===
 with aba_sem_cobertura:
