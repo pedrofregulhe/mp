@@ -844,7 +844,7 @@ else:
     info_msg += f"{total_reg_original:,} registros &nbsp;|&nbsp; ".replace(",", ".")
 info_msg += "cache válido por 6h"
 if ts_capacidade:
-    info_msg += f" &nbsp;|&nbsp; 📂 Capacidade.xlsx: <b>{ts_capacidade}</b>"
+    info_msg += f" &nbsp;|&nbsp; 📂 Capacidade: <b>{ts_capacidade}</b>"
 if falhas_parse > 0:
     info_msg += f" &nbsp;|&nbsp; ⚠️ {falhas_parse} datas de OS não puderam ser parseadas"
 if classificacoes_selecionadas:
