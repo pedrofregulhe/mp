@@ -28,7 +28,6 @@ class StatusFin:
     ADIMPLENTE = 'Adimplente'
     INADIMPLENTE = 'Inadimplente'
 
-ARQUIVO_HISTORICO = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'historico_backlog_mp.csv')
 ARQUIVO_FUNIL = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'historico_funil.csv')
 FUSO_BR = pytz.timezone('America/Sao_Paulo')
 
@@ -304,7 +303,7 @@ def carregar_dados_completos():
     WHERE (Account.CNPJ__c != null OR Account.FOZ_CNPJ__c != null)
       AND (Contact.MobilePhone != null OR Contact.Phone != null)
     """
-    # OS de Manutenção Preventiva — usada para o Funil mensal da Fotografia Histórica.
+    # OS de Manutenção Preventiva — usada para o Funil de Conversão Mensal.
     # Limitada aos últimos 12 meses (LAST_N_MONTHS:12) para reduzir o volume puxado —
     # o funil só precisa do período coberto pelos snapshots mais recentes.
     # Campos enxutos: só os realmente consumidos no cálculo do funil.
@@ -964,7 +963,7 @@ aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, a
     "📅 Capacidade Diária",
     "✉️ Mailing Acionável",
     "🎯 M0",
-    "📸 Fotografia Histórica",
+    "🔻 Funil Mensal",
     "📍 Sem Cobertura de CEP",
     "🔍 Consulta de Asset"
 ])
@@ -1743,78 +1742,6 @@ with aba_m0:
 
 # === ABA 6: HISTÓRICO (SNAPSHOT) ===
 with aba_hist:
-    st.markdown("### 📸 Fotografia Histórica (Evolução do Backlog)")
-    st.markdown("Acompanhe a curva de evolução dos atrasos salvando um 'retrato' da operação atual.")
-    
-    tot_atrasos_geral = len(df_ativos_reais[df_ativos_reais['Atraso_Base'] == AtrasoBase.ATRASADO])
-    tot_criticos_geral = len(df_ativos_reais[df_ativos_reais['Status_MP_Real'] == StatusMP.CRITICO])
-    
-    registro_hoje = pd.DataFrame([{
-        'Data Snapshot': datetime.now(FUSO_BR).strftime('%d/%m/%Y %H:%M'),
-        'Volume Base Total': len(df_ativos_reais),
-        'Atraso Consolidado': tot_atrasos_geral,
-        'Atraso Crítico (Sem Ação)': tot_criticos_geral,
-        'Programado (Mês)': len(df_ativos_reais[df_ativos_reais['Status_MP_Real'] == StatusMP.PROGRAMADO])
-    }])
-    
-    col_hist1, col_hist2 = st.columns([1, 4])
-    with col_hist1:
-        if st.button("Salvar Retrato de Hoje", type="primary"):
-            try:
-                if os.path.exists(ARQUIVO_HISTORICO):
-                    df_hist = ler_csv_seguro(ARQUIVO_HISTORICO)
-                    df_hist = pd.concat([df_hist, registro_hoje], ignore_index=True)
-                else:
-                    df_hist = registro_hoje
-                df_hist.to_csv(ARQUIVO_HISTORICO, index=False)
-                st.success("Snapshot salvo com sucesso!")
-            except Exception as e:
-                st.error(f"Erro ao salvar snapshot: {e}")
-            
-    with col_hist2:
-        if os.path.exists(ARQUIVO_HISTORICO):
-            try:
-                df_hist_plot = ler_csv_seguro(ARQUIVO_HISTORICO)
-                df_hist_plot['Data_Parse'] = pd.to_datetime(df_hist_plot['Data Snapshot'], format='%d/%m/%Y %H:%M')
-                df_hist_plot = df_hist_plot.sort_values('Data_Parse')
-                
-                # Renomeia visualmente para o gráfico (a coluna interna mantém o nome antigo
-                # para preservar compatibilidade com CSVs já salvos antes da renomeação).
-                df_plot = df_hist_plot.rename(columns={'Atraso Crítico (Sem Ação)': 'Atraso (Sem Ação)'})
-                
-                fig_linha = px.line(
-                    df_plot, x='Data Snapshot', y=['Atraso Consolidado', 'Atraso (Sem Ação)'], 
-                    markers=True, title="Curva de Redução de Atrasos",
-                    color_discrete_map={'Atraso Consolidado': '#1f77b4', 'Atraso (Sem Ação)': '#d62728'}
-                )
-                fig_linha.update_layout(yaxis_title="Volume de Máquinas", xaxis_title="Data do Retrato")
-                st.plotly_chart(fig_linha, use_container_width=True)
-                
-                with st.expander("Ver Base Histórica Completa"):
-                    st.dataframe(df_hist_plot.drop(columns=['Data_Parse']), hide_index=True)
-                    st.download_button(
-                        label="📥 Baixar histórico (Excel)",
-                        data=df_para_excel_bytes(df_hist_plot.drop(columns=['Data_Parse']), 'Historico'),
-                        file_name=f"historico_backlog_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.ms-excel",
-                        key="dl_historico"
-                    )
-            except Exception as e:
-                st.error(f"Erro ao ler histórico: {e}")
-        else:
-            st.info("Nenhum histórico salvo ainda. Clique no botão ao lado para criar o primeiro registro.")
-    
-    # ============================================================
-    # FUNIL DE CONVERSÃO MENSAL
-    # ============================================================
-    # Conceito: o snapshot do dia 01 congela a LISTA de contratos atrasados naquele
-    # momento (uma linha por contrato). As etapas Z e W são calculadas em tempo real,
-    # lendo as OS de MP atualizadas do Salesforce. Assim:
-    #   X = total de contratos no snapshot
-    #   Y = quantos NÃO tinham OS aberta no snapshot (aptos para acionamento)
-    #   Z = quantos dos aptos ganharam OS de MP criada APÓS a data do snapshot
-    #   W = quantos dos Z tiveram OS executada com sucesso
-    st.markdown("---")
     st.markdown("### 🔻 Funil de Conversão Mensal")
     st.markdown(
         "Mostra a jornada dos contratos atrasados ao longo do mês: do total que "
@@ -2032,8 +1959,15 @@ with aba_hist:
                         
                         # Só conta OS de contratos que estavam no snapshot E que estavam APTOS
                         # (sem OS aberta no momento do snapshot — coerente com o funil)
-                        cods_aptos = set(df_fv[serie_tinha_os == 'false']['Cod_Item'].astype(str))
-                        df_os_aptos = df_os_periodo[df_os_periodo['CodigoItem'].astype(str).isin(cods_aptos)]
+                        # Normaliza Cod_Item removendo zeros à esquerda em AMBOS os lados
+                        # (o CSV pode perder zeros e o Salesforce mantém — sem isso, perderia matches)
+                        cods_aptos = set(
+                            df_fv[serie_tinha_os == 'false']['Cod_Item']
+                            .astype(str).str.lstrip('0')
+                        )
+                        df_os_aptos = df_os_periodo[
+                            df_os_periodo['CodigoItem'].astype(str).str.lstrip('0').isin(cods_aptos)
+                        ]
                         
                         # Z = contratos aptos que ganharam pelo menos 1 OS de MP no mês (dedup por contrato)
                         cods_com_os = set(df_os_aptos['CodigoItem'].dropna().astype(str))
@@ -2047,6 +1981,37 @@ with aba_hist:
                     
                     if aviso_os:
                         st.warning(aviso_os)
+                    
+                    # Legenda explicativa — para o leitor (diretoria) entender o funil de bate-pronto
+                    st.markdown(
+                        """
+                        <div style='background-color:#f1f5f9; border-left:4px solid #1f77b4; padding:14px 18px; border-radius:6px; margin-bottom:18px;'>
+                            <div style='font-size:13px; font-weight:700; color:#0f172a; margin-bottom:8px;'>📖 Como ler este funil</div>
+                            <table style='width:100%; font-size:12px; color:#334155; border-collapse:collapse;'>
+                                <tr>
+                                    <td style='padding:4px 8px; vertical-align:top; width:40px;'><span style='display:inline-block; width:14px; height:14px; background-color:#1f77b4; border-radius:3px;'></span></td>
+                                    <td style='padding:4px 8px;'><b>Iniciaram o mês em atraso</b> — contratos cuja manutenção preventiva já estava vencida há mais de 1 mês na foto do dia 01.</td>
+                                </tr>
+                                <tr>
+                                    <td style='padding:4px 8px; vertical-align:top;'><span style='display:inline-block; width:14px; height:14px; background-color:#17a2b8; border-radius:3px;'></span></td>
+                                    <td style='padding:4px 8px;'><b>Aptos para acionamento</b> — destes, os que ainda não tinham nenhuma ordem de serviço aberta (passíveis de novo contato).</td>
+                                </tr>
+                                <tr>
+                                    <td style='padding:4px 8px; vertical-align:top;'><span style='display:inline-block; width:14px; height:14px; background-color:#ffc107; border-radius:3px;'></span></td>
+                                    <td style='padding:4px 8px;'><b>MP agendada no mês</b> — destes aptos, quantos efetivamente tiveram uma ordem de manutenção preventiva criada durante o mês.</td>
+                                </tr>
+                                <tr>
+                                    <td style='padding:4px 8px; vertical-align:top;'><span style='display:inline-block; width:14px; height:14px; background-color:#28a745; border-radius:3px;'></span></td>
+                                    <td style='padding:4px 8px;'><b>OS de MP baixada com sucesso</b> — destes agendados, quantos tiveram a manutenção concluída e executada com sucesso.</td>
+                                </tr>
+                            </table>
+                            <div style='font-size:11px; color:#64748b; margin-top:10px; font-style:italic;'>
+                                💡 Os percentuais no gráfico mostram a proporção em relação ao início do funil (etapa azul). Quanto menor a queda entre as etapas, melhor está a operação convertendo atrasos em manutenções concluídas.
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
                     
                     # Gráfico de funil
                     etapas = [
@@ -2115,8 +2080,13 @@ with aba_hist:
                                     (df_os_mp_atual['CreatedDate'] >= data_m) &
                                     (df_os_mp_atual['CreatedDate'] < fim_m)
                                 ]
-                                cods_aptos_m = set(sub[serie_tinha_os_m == 'false']['Cod_Item'].astype(str))
-                                df_os_aptos_m = df_os_p[df_os_p['CodigoItem'].astype(str).isin(cods_aptos_m)]
+                                cods_aptos_m = set(
+                                    sub[serie_tinha_os_m == 'false']['Cod_Item']
+                                    .astype(str).str.lstrip('0')
+                                )
+                                df_os_aptos_m = df_os_p[
+                                    df_os_p['CodigoItem'].astype(str).str.lstrip('0').isin(cods_aptos_m)
+                                ]
                                 Z_m = df_os_aptos_m['CodigoItem'].dropna().nunique()
                                 W_m = df_os_aptos_m[df_os_aptos_m['Status_Caso'] == 'Executado com Sucesso']['CodigoItem'].dropna().nunique()
                             else:
