@@ -159,22 +159,43 @@ def tratar_data_segura(val):
 
 def ler_csv_seguro(caminho):
     """
-    Lê um arquivo CSV tentando vários encodings comuns. Windows/Excel costuma salvar em
-    cp1252 ou latin-1, enquanto sistemas modernos usam UTF-8. Esta função tenta cada um
-    em ordem até encontrar o que funciona.
+    Lê um arquivo CSV tentando vários encodings E vários separadores comuns.
+    Windows/Excel costuma salvar em cp1252 ou latin-1; configuração regional brasileira
+    do Excel usa ';' como separador. Esta função tenta todas as combinações até funcionar
+    e, em último caso, ainda tenta ler ignorando linhas mal-formadas.
     """
     encodings_para_tentar = ['utf-8', 'utf-8-sig', 'cp1252', 'latin-1', 'iso-8859-1']
+    separadores_para_tentar = [',', ';', '\t']
     ultimo_erro = None
+    
+    # Primeira passada: tenta cada combinação de encoding x separador
     for enc in encodings_para_tentar:
-        try:
-            return pd.read_csv(caminho, encoding=enc)
-        except (UnicodeDecodeError, UnicodeError) as e:
-            ultimo_erro = e
-            continue
-    # Se nenhum encoding funcionou, lança o último erro com mensagem amigável
+        for sep in separadores_para_tentar:
+            try:
+                df = pd.read_csv(caminho, encoding=enc, sep=sep)
+                # Validação: o CSV precisa ter pelo menos 2 colunas (1 coluna = não detectou separador)
+                if len(df.columns) >= 2:
+                    return df
+            except (UnicodeDecodeError, UnicodeError, pd.errors.ParserError) as e:
+                ultimo_erro = e
+                continue
+    
+    # Segunda passada (último recurso): força leitura ignorando linhas com erro,
+    # para que pelo menos o que está bem-formado seja recuperado
+    for enc in encodings_para_tentar:
+        for sep in separadores_para_tentar:
+            try:
+                df = pd.read_csv(caminho, encoding=enc, sep=sep, on_bad_lines='skip', engine='python')
+                if len(df.columns) >= 2 and len(df) > 0:
+                    return df
+            except Exception as e:
+                ultimo_erro = e
+                continue
+    
     raise ValueError(
-        f"Não foi possível ler o arquivo {caminho} com nenhum encoding testado "
-        f"({', '.join(encodings_para_tentar)}). Último erro: {ultimo_erro}"
+        f"Não foi possível ler o arquivo {caminho}. "
+        f"Verifique se o arquivo está intacto e usa vírgula ou ponto-e-vírgula como separador. "
+        f"Último erro: {ultimo_erro}"
     )
 
 def df_para_excel_bytes(df, sheet_name='Dados'):
