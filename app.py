@@ -164,6 +164,20 @@ def ler_csv_seguro(caminho):
     de que o separador correto foi detectado (separador errado junta tudo em poucas colunas).
     Em último caso, tenta novamente ignorando linhas mal-formadas.
     """
+    # Pre-check: detecta arquivo XLSX disfarçado de CSV (assinatura PK no início)
+    try:
+        with open(caminho, 'rb') as f:
+            primeiros_bytes = f.read(4)
+        if primeiros_bytes.startswith(b'PK\x03\x04') or primeiros_bytes.startswith(b'PK!'):
+            raise ValueError(
+                f"O arquivo '{os.path.basename(caminho)}' é um arquivo Excel (.xlsx) "
+                f"renomeado para .csv — eles têm formatos internos diferentes e não são "
+                f"compatíveis. Use o botão '📸 Capturar Atrasos do Dia 01' para gerar um "
+                f"CSV de verdade (via download OU via Copiar e Colar)."
+            )
+    except (OSError, IOError):
+        pass  # se não conseguir ler para checar, segue o fluxo normal
+    
     encodings_para_tentar = ['utf-8', 'utf-8-sig', 'cp1252', 'latin-1', 'iso-8859-1']
     separadores_para_tentar = [',', ';', '\t']
     melhor_df = None
@@ -1863,17 +1877,42 @@ with aba_hist:
             
             st.success(
                 f"✅ Snapshot de {rotulo_mes_funil} capturado com {len(df_snapshot_export)} contratos! "
-                f"Baixe o arquivo abaixo e coloque na pasta raiz do projeto."
+                f"Use uma das duas formas abaixo para atualizar o arquivo do projeto."
             )
             
-            csv_funil = df_funil_atualizado.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 Baixar historico_funil.csv (colocar na pasta do projeto)",
-                data=csv_funil,
-                file_name="historico_funil.csv",
-                mime="text/csv",
-                key="dl_funil_csv"
-            )
+            csv_funil_str = df_funil_atualizado.to_csv(index=False)
+            csv_funil_bytes = csv_funil_str.encode('utf-8-sig')
+            
+            # Tabs com as duas opções de saída
+            tab_download, tab_copiar = st.tabs(["📥 Baixar arquivo", "📋 Copiar e colar (sem download)"])
+            
+            with tab_download:
+                st.caption(
+                    "Clique no botão para baixar o arquivo CSV e substituir o `historico_funil.csv` "
+                    "na pasta do projeto."
+                )
+                st.download_button(
+                    label="📥 Baixar historico_funil.csv",
+                    data=csv_funil_bytes,
+                    file_name="historico_funil.csv",
+                    mime="text/csv",
+                    key="dl_funil_csv"
+                )
+            
+            with tab_copiar:
+                st.caption(
+                    "**Use esta opção se sua rede bloqueia downloads.** "
+                    "1) Clique no ícone de copiar no canto superior direito da caixa abaixo. "
+                    "2) Abra o Bloco de Notas (ou VS Code). "
+                    "3) Cole (Ctrl+V) e salve como **`historico_funil.csv`** — "
+                    "no Bloco de Notas, escolha **Codificação: UTF-8** e nome com aspas: `\"historico_funil.csv\"`. "
+                    "4) Substitua o arquivo na pasta do projeto."
+                )
+                st.code(csv_funil_str, language="csv")
+                st.info(
+                    f"📊 **{len(df_funil_atualizado):,} linhas** no arquivo total — "
+                    f"se for muito grande, use o Bloco de Notas (lida bem com arquivos grandes).".replace(",", ".")
+                )
     
     # ---- VISUALIZAÇÃO ----
     st.markdown("#### 📊 Visualização")
@@ -1894,13 +1933,35 @@ with aba_hist:
             colunas_faltando = [c for c in colunas_esperadas if c not in df_funil_view.columns]
             
             if colunas_faltando:
-                st.error(
-                    f"⚠️ O arquivo `historico_funil.csv` está com estrutura antiga ou incorreta. "
-                    f"Colunas faltando: **{', '.join(colunas_faltando)}**. "
-                    f"Clique em **📸 Capturar Atrasos do Dia 01** para gerar um arquivo novo no formato correto."
-                )
+                # Detecta se as colunas "encontradas" parecem ser lixo de XLSX
+                colunas_str = ", ".join(map(str, df_funil_view.columns.tolist()))
+                parece_xlsx = 'PK' in colunas_str or 'Content_Types' in colunas_str or 'xml' in colunas_str
+                
+                if parece_xlsx:
+                    st.error(
+                        "⚠️ **O arquivo `historico_funil.csv` na pasta é um Excel (.xlsx) renomeado, "
+                        "não um CSV de verdade.** Excel e CSV têm formatos internos diferentes — "
+                        "renomear a extensão não converte um no outro."
+                    )
+                    st.markdown(
+                        "**Para resolver:** \n"
+                        "1. Clique em **📸 Capturar Atrasos do Dia 01** acima.\n"
+                        "2. Na seção que aparecer, use a aba **📋 Copiar e colar** (se sua rede bloqueia downloads).\n"
+                        "3. Cole o conteúdo no Bloco de Notas, salve como `historico_funil.csv` "
+                        "(com aspas no nome para não virar .txt), e suba pro GitHub."
+                    )
+                else:
+                    st.error(
+                        f"⚠️ O arquivo `historico_funil.csv` está com estrutura antiga ou incorreta. "
+                        f"Colunas faltando: **{', '.join(colunas_faltando)}**."
+                    )
+                    st.markdown(
+                        "Clique em **📸 Capturar Atrasos do Dia 01** para gerar um arquivo novo no formato correto. "
+                        "Se sua rede bloqueia downloads, use a aba **📋 Copiar e colar** que aparece após a captura."
+                    )
+                
                 with st.expander("🔎 Diagnóstico — colunas detectadas no arquivo"):
-                    st.code(", ".join(map(str, df_funil_view.columns.tolist())))
+                    st.code(colunas_str)
             else:
                 # Filtros
                 col_f1, col_f2, col_f3 = st.columns(3)
