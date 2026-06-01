@@ -157,6 +157,26 @@ def tratar_data_segura(val):
         return data_obj.strftime('%d/%m/%Y')
     except: return str(val).split('T')[0]
 
+def ler_csv_seguro(caminho):
+    """
+    Lê um arquivo CSV tentando vários encodings comuns. Windows/Excel costuma salvar em
+    cp1252 ou latin-1, enquanto sistemas modernos usam UTF-8. Esta função tenta cada um
+    em ordem até encontrar o que funciona.
+    """
+    encodings_para_tentar = ['utf-8', 'utf-8-sig', 'cp1252', 'latin-1', 'iso-8859-1']
+    ultimo_erro = None
+    for enc in encodings_para_tentar:
+        try:
+            return pd.read_csv(caminho, encoding=enc)
+        except (UnicodeDecodeError, UnicodeError) as e:
+            ultimo_erro = e
+            continue
+    # Se nenhum encoding funcionou, lança o último erro com mensagem amigável
+    raise ValueError(
+        f"Não foi possível ler o arquivo {caminho} com nenhum encoding testado "
+        f"({', '.join(encodings_para_tentar)}). Último erro: {ultimo_erro}"
+    )
+
 def df_para_excel_bytes(df, sheet_name='Dados'):
     """Converte DataFrame em bytes Excel para download_button."""
     buffer = io.BytesIO()
@@ -844,7 +864,7 @@ else:
     info_msg += f"{total_reg_original:,} registros &nbsp;|&nbsp; ".replace(",", ".")
 info_msg += "cache válido por 6h"
 if ts_capacidade:
-    info_msg += f" &nbsp;|&nbsp; 📂 Capacidade: <b>{ts_capacidade}</b>"
+    info_msg += f" &nbsp;|&nbsp; 📂 Capacidade.xlsx: <b>{ts_capacidade}</b>"
 if falhas_parse > 0:
     info_msg += f" &nbsp;|&nbsp; ⚠️ {falhas_parse} datas de OS não puderam ser parseadas"
 if classificacoes_selecionadas:
@@ -1686,7 +1706,7 @@ with aba_hist:
         if st.button("Salvar Retrato de Hoje", type="primary"):
             try:
                 if os.path.exists(ARQUIVO_HISTORICO):
-                    df_hist = pd.read_csv(ARQUIVO_HISTORICO)
+                    df_hist = ler_csv_seguro(ARQUIVO_HISTORICO)
                     df_hist = pd.concat([df_hist, registro_hoje], ignore_index=True)
                 else:
                     df_hist = registro_hoje
@@ -1698,7 +1718,7 @@ with aba_hist:
     with col_hist2:
         if os.path.exists(ARQUIVO_HISTORICO):
             try:
-                df_hist_plot = pd.read_csv(ARQUIVO_HISTORICO)
+                df_hist_plot = ler_csv_seguro(ARQUIVO_HISTORICO)
                 df_hist_plot['Data_Parse'] = pd.to_datetime(df_hist_plot['Data Snapshot'], format='%d/%m/%Y %H:%M')
                 df_hist_plot = df_hist_plot.sort_values('Data_Parse')
                 
@@ -1821,7 +1841,7 @@ with aba_hist:
             # Junta com o histórico existente (lê da pasta se houver)
             if os.path.exists(ARQUIVO_FUNIL):
                 try:
-                    df_funil_hist = pd.read_csv(ARQUIVO_FUNIL)
+                    df_funil_hist = ler_csv_seguro(ARQUIVO_FUNIL)
                     # Remove qualquer captura anterior do MESMO mês (recaptura substitui)
                     df_funil_hist = df_funil_hist[df_funil_hist['Mes_Referencia'] != rotulo_mes_funil]
                     df_funil_atualizado = pd.concat([df_funil_hist, df_funil_mes], ignore_index=True)
@@ -1835,8 +1855,9 @@ with aba_hist:
                 f"Baixe o arquivo abaixo e coloque na pasta raiz do projeto (substituindo o anterior)."
             )
             
-            # Oferece o CSV atualizado para download
-            csv_funil = df_funil_atualizado.to_csv(index=False).encode('utf-8')
+            # Oferece o CSV atualizado para download (UTF-8 com BOM — abre corretamente no Excel,
+            # preservando acentos, e é o encoding que ler_csv_seguro vai aceitar de volta)
+            csv_funil = df_funil_atualizado.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
                 label="📥 Baixar historico_funil.csv (colocar na pasta do projeto)",
                 data=csv_funil,
@@ -1856,7 +1877,7 @@ with aba_hist:
         )
     else:
         try:
-            df_funil_view = pd.read_csv(ARQUIVO_FUNIL)
+            df_funil_view = ler_csv_seguro(ARQUIVO_FUNIL)
             
             # Filtros: mês, classificação, status financeiro
             col_f1, col_f2, col_f3 = st.columns(3)
