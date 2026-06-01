@@ -244,7 +244,10 @@ def exibir_extrato_resumido(df_alvo, key_download=None):
 # ==========================================
 # 3. CONEXÃO E PROCESSAMENTO
 # ==========================================
-@st.cache_data(ttl=21600, show_spinner=False)
+# IMPORTANTE: cache_resource (não cache_data) — assim a base do Salesforce é UMA SÓ
+# para todos os usuários do app. Reduz drasticamente o consumo de memória quando
+# múltiplas pessoas usam o painel ao mesmo tempo.
+@st.cache_resource(ttl=21600, show_spinner=False)
 def carregar_dados_completos():
     sf = Salesforce(
         username=st.secrets["salesforce"]["username"], 
@@ -288,16 +291,16 @@ def carregar_dados_completos():
       AND (Contact.MobilePhone != null OR Contact.Phone != null)
     """
     # OS de Manutenção Preventiva — usada para o Funil mensal da Fotografia Histórica.
-    # Traz a data de criação da OS (CreatedDate, quando foi agendada) e o status do Caso
-    # (para identificar baixas "Executado com Sucesso"). Considera apenas OS de MP.
+    # Limitada aos últimos 12 meses (LAST_N_MONTHS:12) para reduzir o volume puxado —
+    # o funil só precisa do período coberto pelos snapshots mais recentes.
+    # Campos enxutos: só os realmente consumidos no cálculo do funil.
     query_os_mp = """
     SELECT 
-        Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.CaseNumber, Case.Status, Case.CreatedDate,
-        Case.Account.FOZ_Classificacao__c, Case.Account.FOZ_StatusPosicaoFinanceira__c,
-        FOZ_Tipo_de_Servico__c, FOZ_Agendado_Data_Periodo__c
+        Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.Status, Case.CreatedDate
     FROM WorkOrder 
     WHERE Case.Type = 'OS' 
       AND FOZ_Tipo_de_Servico__c LIKE '%MP%'
+      AND Case.CreatedDate = LAST_N_MONTHS:12
     """
     
     registros_ativos = sf.query_all(query_ativos).get('records', [])
@@ -467,6 +470,19 @@ def carregar_dados_completos():
     qtd_contratos_por_cnpj = df.groupby('Account.CNPJ__c')['FOZ_CodigoItem__c'].count()
     df['Qtd_Contratos_Cliente'] = df['Account.CNPJ__c'].map(qtd_contratos_por_cnpj).fillna(1).astype(int)
     
+    # ----------------------------------------------------------
+    # OTIMIZAÇÃO DE MEMÓRIA: converte colunas categóricas (poucos valores únicos
+    # repetidos milhares de vezes) para o tipo 'category', que reduz drasticamente
+    # o footprint na RAM. Importante quando o painel hospeda vários usuários.
+    # ----------------------------------------------------------
+    cols_categoricas = [
+        'Status_MP_Real', 'Atraso_Base', 'AGING_MP', 'Status_Financeiro',
+        'Classificacao', 'FOZ_EndFranquiaForm__c', 'Status'
+    ]
+    for col in cols_categoricas:
+        if col in df.columns:
+            df[col] = df[col].astype('category')
+    
     # ==========================================
     # TELEFONES POR CNPJ (versão vetorizada — otimizada para memória)
     # ==========================================
@@ -550,27 +566,24 @@ def carregar_dados_completos():
     # ==========================================
     # Monta um DataFrame com as OS de manutenção preventiva, normalizando a data de
     # criação (CreatedDate) para identificar em qual mês a OS foi agendada, e o status
-    # do caso para identificar baixas com sucesso.
-    linhas_os_mp = []
-    for reg in registros_os_mp:
-        caso = reg.get('Case') or {}
-        asset = caso.get('FOZ_Asset__r') or {}
-        conta = caso.get('Account') or {}
-        created = caso.get('CreatedDate')
-        linhas_os_mp.append({
-            'CodigoItem': asset.get('FOZ_CodigoItem__c'),
-            'CaseNumber': caso.get('CaseNumber'),
-            'Status_Caso': caso.get('Status'),
-            'CreatedDate': created,
-            'Classificacao': conta.get('FOZ_Classificacao__c'),
-            'Status_Posicao_Fin': conta.get('FOZ_StatusPosicaoFinanceira__c'),
-        })
-    df_os_mp = pd.DataFrame(linhas_os_mp)
-    del linhas_os_mp, registros_os_mp
-    if not df_os_mp.empty:
+    # do caso para identificar baixas com sucesso. Vetorizado via json_normalize (mais
+    # rápido que loop Python para milhares de registros).
+    if registros_os_mp:
+        df_os_mp = pd.json_normalize(registros_os_mp)
+        # Renomeia colunas aninhadas para nomes simples
+        rename_os = {
+            'Case.FOZ_Asset__r.FOZ_CodigoItem__c': 'CodigoItem',
+            'Case.Status': 'Status_Caso',
+            'Case.CreatedDate': 'CreatedDate',
+        }
+        df_os_mp = df_os_mp.rename(columns=rename_os)
+        # Mantém só o necessário
+        cols_keep = [c for c in ['CodigoItem', 'Status_Caso', 'CreatedDate'] if c in df_os_mp.columns]
+        df_os_mp = df_os_mp[cols_keep]
         df_os_mp['CreatedDate'] = pd.to_datetime(df_os_mp['CreatedDate'], errors='coerce').dt.tz_localize(None)
-        df_os_mp['Ano_Criacao'] = df_os_mp['CreatedDate'].dt.year
-        df_os_mp['Mes_Criacao'] = df_os_mp['CreatedDate'].dt.month
+    else:
+        df_os_mp = pd.DataFrame(columns=['CodigoItem', 'Status_Caso', 'CreatedDate'])
+    del registros_os_mp
     
     # Metadados úteis para a UI
     df.attrs['timestamp_carga'] = hoje.strftime('%d/%m/%Y %H:%M:%S')
@@ -581,7 +594,7 @@ def carregar_dados_completos():
         
     return df
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def processar_arquivos_estaveis(bytes_range_cep, bytes_depara):
     """
     Processa os arquivos de cadastro estáveis (Range CEP e De-Para). Esses arquivos
@@ -616,7 +629,7 @@ def processar_arquivos_estaveis(bytes_range_cep, bytes_depara):
     
     return df_ranges, dict_depara, duplicatas_depara
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def processar_capacidade(bytes_capacidade):
     """
     Processa o arquivo de Capacidade (foto operacional que muda toda hora — vem
@@ -749,7 +762,7 @@ def diagnosticar_cep(cep_num, df_ranges, dict_depara):
     
     return resultado
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def construir_mapa_cep_prestador(ceps_unicos_tuple, df_ranges, dict_depara):
     """
     Constrói um dicionário {cep_num: prestador} a partir de CEPs únicos.
