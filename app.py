@@ -159,38 +159,46 @@ def tratar_data_segura(val):
 
 def ler_csv_seguro(caminho):
     """
-    Lê um arquivo CSV tentando vários encodings E vários separadores comuns.
-    Windows/Excel costuma salvar em cp1252 ou latin-1; configuração regional brasileira
-    do Excel usa ';' como separador. Esta função tenta todas as combinações até funcionar
-    e, em último caso, ainda tenta ler ignorando linhas mal-formadas.
+    Lê um arquivo CSV tentando vários encodings E separadores. A heurística é:
+    testa todas as combinações e fica com aquela que produz MAIS COLUNAS — é o sinal
+    de que o separador correto foi detectado (separador errado junta tudo em poucas colunas).
+    Em último caso, tenta novamente ignorando linhas mal-formadas.
     """
     encodings_para_tentar = ['utf-8', 'utf-8-sig', 'cp1252', 'latin-1', 'iso-8859-1']
     separadores_para_tentar = [',', ';', '\t']
+    melhor_df = None
+    melhor_num_colunas = 1
     ultimo_erro = None
     
-    # Primeira passada: tenta cada combinação de encoding x separador
+    # Primeira passada: testa todas as combinações e fica com a que tem MAIS colunas
     for enc in encodings_para_tentar:
         for sep in separadores_para_tentar:
             try:
                 df = pd.read_csv(caminho, encoding=enc, sep=sep)
-                # Validação: o CSV precisa ter pelo menos 2 colunas (1 coluna = não detectou separador)
-                if len(df.columns) >= 2:
-                    return df
+                if len(df.columns) > melhor_num_colunas:
+                    melhor_df = df
+                    melhor_num_colunas = len(df.columns)
             except (UnicodeDecodeError, UnicodeError, pd.errors.ParserError) as e:
                 ultimo_erro = e
                 continue
     
-    # Segunda passada (último recurso): força leitura ignorando linhas com erro,
-    # para que pelo menos o que está bem-formado seja recuperado
+    if melhor_df is not None:
+        return melhor_df
+    
+    # Segunda passada (último recurso): ignora linhas mal-formadas
     for enc in encodings_para_tentar:
         for sep in separadores_para_tentar:
             try:
                 df = pd.read_csv(caminho, encoding=enc, sep=sep, on_bad_lines='skip', engine='python')
-                if len(df.columns) >= 2 and len(df) > 0:
-                    return df
+                if len(df.columns) > melhor_num_colunas and len(df) > 0:
+                    melhor_df = df
+                    melhor_num_colunas = len(df.columns)
             except Exception as e:
                 ultimo_erro = e
                 continue
+    
+    if melhor_df is not None:
+        return melhor_df
     
     raise ValueError(
         f"Não foi possível ler o arquivo {caminho}. "
@@ -1772,12 +1780,20 @@ with aba_hist:
     # ============================================================
     # FUNIL DE CONVERSÃO MENSAL
     # ============================================================
+    # Conceito: o snapshot do dia 01 congela a LISTA de contratos atrasados naquele
+    # momento (uma linha por contrato). As etapas Z e W são calculadas em tempo real,
+    # lendo as OS de MP atualizadas do Salesforce. Assim:
+    #   X = total de contratos no snapshot
+    #   Y = quantos NÃO tinham OS aberta no snapshot (aptos para acionamento)
+    #   Z = quantos dos aptos ganharam OS de MP criada APÓS a data do snapshot
+    #   W = quantos dos Z tiveram OS executada com sucesso
     st.markdown("---")
     st.markdown("### 🔻 Funil de Conversão Mensal")
     st.markdown(
-        "Acompanha a jornada do atraso ao longo do mês: do total que iniciou o mês em atraso, "
-        "quantos estavam aptos para acionamento, quantos tiveram MP agendada e quantos tiveram "
-        "a OS de MP baixada com sucesso. **Capture o retrato no início de cada mês** para construir a série."
+        "Mostra a jornada dos contratos atrasados ao longo do mês: do total que "
+        "iniciou o mês em atraso, quantos estavam aptos para acionamento, quantos "
+        "tiveram MP agendada e quantos tiveram a OS executada com sucesso. "
+        "**Capture uma vez no dia 01 do mês** — o painel calcula o restante automaticamente."
     )
     
     hoje_funil = datetime.now(FUSO_BR)
@@ -1789,95 +1805,54 @@ with aba_hist:
     }
     rotulo_mes_funil = f"{nomes_meses_funil[mes_funil]}/{ano_funil}"
     
-    # ---- CÁLCULO DAS 4 MÉTRICAS DO FUNIL (para o mês corrente) ----
-    # A captura gera uma linha por combinação (Classificação x Status Financeiro),
-    # permitindo que os filtros da visualização funcionem depois.
-    df_os_mp = df_final.attrs.get('os_mp', pd.DataFrame())
-    
-    # Base do funil: contratos atrasados (X)
-    df_funil_base = df_ativos_reais[df_ativos_reais['Atraso_Base'] == AtrasoBase.ATRASADO].copy()
-    
-    # OS de MP criadas DENTRO do mês corrente (mês fechado)
-    if not df_os_mp.empty:
-        df_os_mes = df_os_mp[
-            (df_os_mp['Mes_Criacao'] == mes_funil) & (df_os_mp['Ano_Criacao'] == ano_funil)
-        ].copy()
-    else:
-        df_os_mes = pd.DataFrame(columns=['CodigoItem', 'Status_Caso'])
-    
-    # Conjuntos de códigos para os cruzamentos
-    cod_os_agendadas = set(df_os_mes['CodigoItem'].dropna().astype(str))
-    cod_os_baixadas = set(
-        df_os_mes[df_os_mes['Status_Caso'] == 'Executado com Sucesso']['CodigoItem'].dropna().astype(str)
-    )
-    
-    def calcular_funil(df_segmento):
-        """Calcula X, Y, Z, W para um subconjunto de contratos atrasados."""
-        cods = df_segmento['FOZ_CodigoItem__c'].astype(str)
-        X = len(df_segmento)  # iniciaram o mês em atraso
-        Y = int((df_segmento['Tem_OS_Aberta'] == False).sum())  # aptos (sem OS aberta)
-        Z = int(cods.isin(cod_os_agendadas).sum())  # tiveram MP agendada no mês
-        W = int(cods.isin(cod_os_baixadas).sum())  # OS de MP baixada com sucesso
-        return X, Y, Z, W
-    
-    # Monta o registro do mês quebrado por Classificação x Status Financeiro
-    linhas_funil_mes = []
-    for classif in df_funil_base['Classificacao'].dropna().unique():
-        for status_fin in df_funil_base['Status_Financeiro'].dropna().unique():
-            sub = df_funil_base[
-                (df_funil_base['Classificacao'] == classif) &
-                (df_funil_base['Status_Financeiro'] == status_fin)
-            ]
-            if len(sub) == 0:
-                continue
-            X, Y, Z, W = calcular_funil(sub)
-            linhas_funil_mes.append({
-                'Mes_Referencia': rotulo_mes_funil,
-                'Ano': ano_funil,
-                'Mes': mes_funil,
-                'Classificacao': classif,
-                'Status_Financeiro': status_fin,
-                'X_Iniciaram_Atraso': X,
-                'Y_Aptos_Acionamento': Y,
-                'Z_MP_Agendada': Z,
-                'W_OS_Baixada': W,
-                'Data_Captura': hoje_funil.strftime('%d/%m/%Y %H:%M')
-            })
-    df_funil_mes = pd.DataFrame(linhas_funil_mes)
+    # Monta o SNAPSHOT do momento (lista de contratos atrasados + se tinha OS aberta)
+    df_snapshot = df_ativos_reais[df_ativos_reais['Atraso_Base'] == AtrasoBase.ATRASADO].copy()
+    df_snapshot_export = df_snapshot[[
+        'FOZ_CodigoItem__c', 'Account.CNPJ__c', 'Classificacao', 
+        'Status_Financeiro', 'Tem_OS_Aberta'
+    ]].copy()
+    df_snapshot_export.columns = ['Cod_Item', 'CNPJ', 'Classificacao', 
+                                   'Status_Financeiro', 'Tinha_OS_Aberta_No_Snapshot']
+    df_snapshot_export['Mes_Referencia'] = rotulo_mes_funil
+    df_snapshot_export['Ano'] = ano_funil
+    df_snapshot_export['Mes'] = mes_funil
+    df_snapshot_export['Data_Snapshot'] = hoje_funil.strftime('%d/%m/%Y %H:%M')
     
     # ---- BOTÃO DE CAPTURA ----
     col_cap1, col_cap2 = st.columns([1, 3])
     with col_cap1:
-        capturar_funil = st.button("📸 Capturar Funil do Mês", type="primary", key="btn_capturar_funil")
+        capturar_funil = st.button("📸 Capturar Atrasos do Dia 01", type="primary", key="btn_capturar_funil")
     with col_cap2:
         st.caption(
-            f"Mês de referência: **{rotulo_mes_funil}**. A captura consolida o retrato atual "
-            f"e gera um arquivo para download."
+            f"Capturando para o mês de referência **{rotulo_mes_funil}** "
+            f"(**{len(df_snapshot_export)}** contratos em atraso neste momento). "
+            f"Recaptura no mesmo mês substitui a anterior."
         )
     
     if capturar_funil:
-        if df_funil_mes.empty:
-            st.warning("Não há contratos em atraso para capturar neste mês.")
+        if df_snapshot_export.empty:
+            st.warning("Não há contratos em atraso para capturar neste momento.")
         else:
-            # Junta com o histórico existente (lê da pasta se houver)
+            # Junta com o histórico (se houver), removendo qualquer captura anterior do MESMO mês
             if os.path.exists(ARQUIVO_FUNIL):
                 try:
                     df_funil_hist = ler_csv_seguro(ARQUIVO_FUNIL)
-                    # Remove qualquer captura anterior do MESMO mês (recaptura substitui)
-                    df_funil_hist = df_funil_hist[df_funil_hist['Mes_Referencia'] != rotulo_mes_funil]
-                    df_funil_atualizado = pd.concat([df_funil_hist, df_funil_mes], ignore_index=True)
+                    if 'Mes_Referencia' in df_funil_hist.columns:
+                        df_funil_hist = df_funil_hist[df_funil_hist['Mes_Referencia'] != rotulo_mes_funil]
+                        df_funil_atualizado = pd.concat([df_funil_hist, df_snapshot_export], ignore_index=True)
+                    else:
+                        # Arquivo antigo com estrutura agregada — descarta
+                        df_funil_atualizado = df_snapshot_export
                 except Exception:
-                    df_funil_atualizado = df_funil_mes
+                    df_funil_atualizado = df_snapshot_export
             else:
-                df_funil_atualizado = df_funil_mes
+                df_funil_atualizado = df_snapshot_export
             
             st.success(
-                f"✅ Funil de {rotulo_mes_funil} capturado! "
-                f"Baixe o arquivo abaixo e coloque na pasta raiz do projeto (substituindo o anterior)."
+                f"✅ Snapshot de {rotulo_mes_funil} capturado com {len(df_snapshot_export)} contratos! "
+                f"Baixe o arquivo abaixo e coloque na pasta raiz do projeto."
             )
             
-            # Oferece o CSV atualizado para download (UTF-8 com BOM — abre corretamente no Excel,
-            # preservando acentos, e é o encoding que ler_csv_seguro vai aceitar de volta)
             csv_funil = df_funil_atualizado.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
                 label="📥 Baixar historico_funil.csv (colocar na pasta do projeto)",
@@ -1887,118 +1862,214 @@ with aba_hist:
                 key="dl_funil_csv"
             )
     
-    # ---- VISUALIZAÇÃO DO FUNIL ----
+    # ---- VISUALIZAÇÃO ----
     st.markdown("#### 📊 Visualização")
     
     if not os.path.exists(ARQUIVO_FUNIL):
         st.info(
-            "Nenhum funil capturado ainda. Clique em **Capturar Funil do Mês** acima, "
-            "baixe o arquivo `historico_funil.csv` e suba para a pasta do projeto. "
-            "A partir daí, os meses capturados aparecerão aqui."
+            "Nenhum snapshot capturado ainda. Clique em **📸 Capturar Atrasos do Dia 01** acima, "
+            "baixe o arquivo e suba para a pasta do projeto."
         )
     else:
         try:
             df_funil_view = ler_csv_seguro(ARQUIVO_FUNIL)
             
-            # Filtros: mês, classificação, status financeiro
-            col_f1, col_f2, col_f3 = st.columns(3)
-            with col_f1:
-                meses_disp = df_funil_view['Mes_Referencia'].drop_duplicates().tolist()
-                # Ordena cronologicamente
-                meses_ord = sorted(meses_disp, key=lambda m: (
-                    df_funil_view[df_funil_view['Mes_Referencia'] == m]['Ano'].iloc[0],
-                    df_funil_view[df_funil_view['Mes_Referencia'] == m]['Mes'].iloc[0]
-                ))
-                mes_sel = st.selectbox("Mês:", meses_ord, index=len(meses_ord)-1, key="funil_mes")
-            with col_f2:
-                classifs = ["(Todas)"] + sorted(df_funil_view['Classificacao'].dropna().unique().tolist())
-                classif_sel = st.selectbox("Tipo de Cliente:", classifs, key="funil_classif")
-            with col_f3:
-                status_fins = ["(Todos)"] + sorted(df_funil_view['Status_Financeiro'].dropna().unique().tolist())
-                status_sel = st.selectbox("Status Financeiro:", status_fins, key="funil_status")
+            # Validação: estrutura nova precisa ter Cod_Item e Tinha_OS_Aberta_No_Snapshot
+            colunas_esperadas = ['Mes_Referencia', 'Ano', 'Mes', 'Cod_Item', 
+                                 'CNPJ', 'Classificacao', 'Status_Financeiro', 
+                                 'Tinha_OS_Aberta_No_Snapshot', 'Data_Snapshot']
+            colunas_faltando = [c for c in colunas_esperadas if c not in df_funil_view.columns]
             
-            # Aplica filtros
-            df_fv = df_funil_view[df_funil_view['Mes_Referencia'] == mes_sel].copy()
-            if classif_sel != "(Todas)":
-                df_fv = df_fv[df_fv['Classificacao'] == classif_sel]
-            if status_sel != "(Todos)":
-                df_fv = df_fv[df_fv['Status_Financeiro'] == status_sel]
-            
-            if df_fv.empty:
-                st.warning("Nenhum dado para os filtros selecionados.")
-            else:
-                # Soma as métricas do recorte
-                X = int(df_fv['X_Iniciaram_Atraso'].sum())
-                Y = int(df_fv['Y_Aptos_Acionamento'].sum())
-                Z = int(df_fv['Z_MP_Agendada'].sum())
-                W = int(df_fv['W_OS_Baixada'].sum())
-                
-                # Gráfico de funil
-                etapas = [
-                    'Iniciaram o mês em atraso',
-                    'Aptos para acionamento',
-                    'MP agendada',
-                    'OS de MP baixada com sucesso'
-                ]
-                valores = [X, Y, Z, W]
-                
-                fig_funil = go.Figure(go.Funnel(
-                    y=etapas,
-                    x=valores,
-                    textposition="inside",
-                    textinfo="value+percent initial",
-                    marker={"color": ["#1f77b4", "#17a2b8", "#ffc107", "#28a745"]},
-                    connector={"line": {"color": "#cbd5e1", "width": 1}}
-                ))
-                fig_funil.update_layout(
-                    title=f"Funil de Conversão — {mes_sel}",
-                    margin={"t": 50, "b": 20, "l": 20, "r": 20},
-                    height=400
+            if colunas_faltando:
+                st.error(
+                    f"⚠️ O arquivo `historico_funil.csv` está com estrutura antiga ou incorreta. "
+                    f"Colunas faltando: **{', '.join(colunas_faltando)}**. "
+                    f"Clique em **📸 Capturar Atrasos do Dia 01** para gerar um arquivo novo no formato correto."
                 )
-                st.plotly_chart(fig_funil, use_container_width=True)
+                with st.expander("🔎 Diagnóstico — colunas detectadas no arquivo"):
+                    st.code(", ".join(map(str, df_funil_view.columns.tolist())))
+            else:
+                # Filtros
+                col_f1, col_f2, col_f3 = st.columns(3)
+                with col_f1:
+                    meses_disp = df_funil_view['Mes_Referencia'].drop_duplicates().tolist()
+                    meses_ord = sorted(meses_disp, key=lambda m: (
+                        df_funil_view[df_funil_view['Mes_Referencia'] == m]['Ano'].iloc[0],
+                        df_funil_view[df_funil_view['Mes_Referencia'] == m]['Mes'].iloc[0]
+                    ))
+                    mes_sel = st.selectbox("Mês:", meses_ord, index=len(meses_ord)-1, key="funil_mes")
+                with col_f2:
+                    classifs = ["(Todas)"] + sorted(df_funil_view['Classificacao'].dropna().unique().tolist())
+                    classif_sel = st.selectbox("Tipo de Cliente:", classifs, key="funil_classif")
+                with col_f3:
+                    status_fins = ["(Todos)"] + sorted(df_funil_view['Status_Financeiro'].dropna().unique().tolist())
+                    status_sel = st.selectbox("Status Financeiro:", status_fins, key="funil_status")
                 
-                # KPIs de conversão entre etapas
-                col_c1, col_c2, col_c3 = st.columns(3)
-                conv_xy = (Y / X * 100) if X > 0 else 0
-                conv_yz = (Z / Y * 100) if Y > 0 else 0
-                conv_zw = (W / Z * 100) if Z > 0 else 0
-                col_c1.metric("Atraso → Aptos", f"{conv_xy:.1f}%", f"{Y} de {X}")
-                col_c2.metric("Aptos → Agendados", f"{conv_yz:.1f}%", f"{Z} de {Y}")
-                col_c3.metric("Agendados → Baixados", f"{conv_zw:.1f}%", f"{W} de {Z}")
+                # Aplica filtros sobre a lista de contratos do snapshot
+                df_fv = df_funil_view[df_funil_view['Mes_Referencia'] == mes_sel].copy()
+                if classif_sel != "(Todas)":
+                    df_fv = df_fv[df_fv['Classificacao'] == classif_sel]
+                if status_sel != "(Todos)":
+                    df_fv = df_fv[df_fv['Status_Financeiro'] == status_sel]
                 
-                # Evolução mês a mês (se houver mais de um mês capturado)
-                if len(meses_ord) > 1:
-                    st.markdown("#### 📈 Evolução mês a mês")
-                    df_evol = df_funil_view.copy()
-                    if classif_sel != "(Todas)":
-                        df_evol = df_evol[df_evol['Classificacao'] == classif_sel]
-                    if status_sel != "(Todos)":
-                        df_evol = df_evol[df_evol['Status_Financeiro'] == status_sel]
+                if df_fv.empty:
+                    st.warning("Nenhum dado para os filtros selecionados.")
+                else:
+                    # Identifica o mês/ano do snapshot e a data exata
+                    ano_snap = int(df_fv['Ano'].iloc[0])
+                    mes_snap = int(df_fv['Mes'].iloc[0])
+                    # Data do snapshot (primeira data registrada para o mês)
+                    try:
+                        data_snap_str = df_fv['Data_Snapshot'].iloc[0]
+                        data_snap = pd.to_datetime(data_snap_str, format='%d/%m/%Y %H:%M')
+                    except Exception:
+                        # Fallback: primeiro dia do mês
+                        data_snap = pd.Timestamp(year=ano_snap, month=mes_snap, day=1)
                     
-                    df_evol_agg = df_evol.groupby(['Mes_Referencia', 'Ano', 'Mes']).agg(
-                        X=('X_Iniciaram_Atraso', 'sum'),
-                        Y=('Y_Aptos_Acionamento', 'sum'),
-                        Z=('Z_MP_Agendada', 'sum'),
-                        W=('W_OS_Baixada', 'sum'),
-                    ).reset_index().sort_values(['Ano', 'Mes'])
+                    # X e Y vêm DIRETO do snapshot (estado congelado no dia 01)
+                    X = len(df_fv)
+                    # Y = aptos no momento do snapshot (sem OS aberta naquela hora)
+                    # Trata o boolean que pode ter virado string ao salvar/ler do CSV
+                    serie_tinha_os = df_fv['Tinha_OS_Aberta_No_Snapshot'].astype(str).str.lower()
+                    Y = int((serie_tinha_os == 'false').sum())
                     
-                    df_evol_plot = df_evol_agg.rename(columns={
-                        'X': 'Iniciaram atraso', 'Y': 'Aptos',
-                        'Z': 'MP agendada', 'W': 'OS baixada'
-                    })
-                    fig_evol = px.line(
-                        df_evol_plot, x='Mes_Referencia',
-                        y=['Iniciaram atraso', 'Aptos', 'MP agendada', 'OS baixada'],
-                        markers=True, title="Evolução das etapas do funil",
-                        color_discrete_map={
-                            'Iniciaram atraso': '#1f77b4', 'Aptos': '#17a2b8',
-                            'MP agendada': '#ffc107', 'OS baixada': '#28a745'
-                        }
+                    # Z e W são calculados EM TEMPO REAL, lendo as OS de MP do Salesforce
+                    # e verificando quais delas pertencem aos contratos do snapshot
+                    df_os_mp_atual = df_final.attrs.get('os_mp', pd.DataFrame())
+                    
+                    if df_os_mp_atual.empty:
+                        Z = 0
+                        W = 0
+                        aviso_os = "⚠️ Não há OS de MP carregadas do Salesforce — Z e W não puderam ser calculados."
+                    else:
+                        # OS de MP criadas DEPOIS do snapshot E DENTRO do mês de referência
+                        # (mês fechado: só conta o que aconteceu naquele mês)
+                        from pandas import Timestamp
+                        inicio_mes = Timestamp(year=ano_snap, month=mes_snap, day=1)
+                        if mes_snap == 12:
+                            fim_mes = Timestamp(year=ano_snap+1, month=1, day=1)
+                        else:
+                            fim_mes = Timestamp(year=ano_snap, month=mes_snap+1, day=1)
+                        
+                        df_os_periodo = df_os_mp_atual[
+                            (df_os_mp_atual['CreatedDate'] >= data_snap) &
+                            (df_os_mp_atual['CreatedDate'] < fim_mes)
+                        ].copy()
+                        
+                        # Só conta OS de contratos que estavam no snapshot E que estavam APTOS
+                        # (sem OS aberta no momento do snapshot — coerente com o funil)
+                        cods_aptos = set(df_fv[serie_tinha_os == 'false']['Cod_Item'].astype(str))
+                        df_os_aptos = df_os_periodo[df_os_periodo['CodigoItem'].astype(str).isin(cods_aptos)]
+                        
+                        # Z = contratos aptos que ganharam pelo menos 1 OS de MP no mês (dedup por contrato)
+                        cods_com_os = set(df_os_aptos['CodigoItem'].dropna().astype(str))
+                        Z = len(cods_com_os)
+                        
+                        # W = dos Z, quantos tiveram a OS executada com sucesso
+                        df_os_sucesso = df_os_aptos[df_os_aptos['Status_Caso'] == 'Executado com Sucesso']
+                        cods_com_sucesso = set(df_os_sucesso['CodigoItem'].dropna().astype(str))
+                        W = len(cods_com_sucesso)
+                        aviso_os = None
+                    
+                    if aviso_os:
+                        st.warning(aviso_os)
+                    
+                    # Gráfico de funil
+                    etapas = [
+                        'Iniciaram o mês em atraso',
+                        'Aptos para acionamento',
+                        'MP agendada no mês',
+                        'OS de MP baixada com sucesso'
+                    ]
+                    valores = [X, Y, Z, W]
+                    
+                    fig_funil = go.Figure(go.Funnel(
+                        y=etapas,
+                        x=valores,
+                        textposition="inside",
+                        textinfo="value+percent initial",
+                        marker={"color": ["#1f77b4", "#17a2b8", "#ffc107", "#28a745"]},
+                        connector={"line": {"color": "#cbd5e1", "width": 1}}
+                    ))
+                    fig_funil.update_layout(
+                        title=f"Funil de Conversão — {mes_sel}",
+                        margin={"t": 50, "b": 20, "l": 20, "r": 20},
+                        height=400
                     )
-                    fig_evol.update_layout(yaxis_title="Contratos", xaxis_title="Mês")
-                    st.plotly_chart(fig_evol, use_container_width=True)
+                    st.plotly_chart(fig_funil, use_container_width=True)
+                    
+                    # KPIs de conversão
+                    col_c1, col_c2, col_c3 = st.columns(3)
+                    conv_xy = (Y / X * 100) if X > 0 else 0
+                    conv_yz = (Z / Y * 100) if Y > 0 else 0
+                    conv_zw = (W / Z * 100) if Z > 0 else 0
+                    col_c1.metric("Atraso → Aptos", f"{conv_xy:.1f}%", f"{Y} de {X}")
+                    col_c2.metric("Aptos → Agendados", f"{conv_yz:.1f}%", f"{Z} de {Y}")
+                    col_c3.metric("Agendados → Baixados", f"{conv_zw:.1f}%", f"{W} de {Z}")
+                    
+                    # Evolução mês a mês (se houver mais de um mês capturado)
+                    if len(meses_ord) > 1:
+                        st.markdown("#### 📈 Evolução mês a mês")
+                        # Para cada mês, recalcula X/Y/Z/W (a mesma lógica acima, sem filtros)
+                        linhas_evol = []
+                        for mes_lbl in meses_ord:
+                            sub = df_funil_view[df_funil_view['Mes_Referencia'] == mes_lbl]
+                            if classif_sel != "(Todas)":
+                                sub = sub[sub['Classificacao'] == classif_sel]
+                            if status_sel != "(Todos)":
+                                sub = sub[sub['Status_Financeiro'] == status_sel]
+                            if sub.empty:
+                                continue
+                            
+                            ano_m = int(sub['Ano'].iloc[0])
+                            mes_m = int(sub['Mes'].iloc[0])
+                            try:
+                                data_m = pd.to_datetime(sub['Data_Snapshot'].iloc[0], format='%d/%m/%Y %H:%M')
+                            except Exception:
+                                data_m = pd.Timestamp(year=ano_m, month=mes_m, day=1)
+                            
+                            X_m = len(sub)
+                            serie_tinha_os_m = sub['Tinha_OS_Aberta_No_Snapshot'].astype(str).str.lower()
+                            Y_m = int((serie_tinha_os_m == 'false').sum())
+                            
+                            if not df_os_mp_atual.empty:
+                                if mes_m == 12:
+                                    fim_m = Timestamp(year=ano_m+1, month=1, day=1)
+                                else:
+                                    fim_m = Timestamp(year=ano_m, month=mes_m+1, day=1)
+                                df_os_p = df_os_mp_atual[
+                                    (df_os_mp_atual['CreatedDate'] >= data_m) &
+                                    (df_os_mp_atual['CreatedDate'] < fim_m)
+                                ]
+                                cods_aptos_m = set(sub[serie_tinha_os_m == 'false']['Cod_Item'].astype(str))
+                                df_os_aptos_m = df_os_p[df_os_p['CodigoItem'].astype(str).isin(cods_aptos_m)]
+                                Z_m = df_os_aptos_m['CodigoItem'].dropna().nunique()
+                                W_m = df_os_aptos_m[df_os_aptos_m['Status_Caso'] == 'Executado com Sucesso']['CodigoItem'].dropna().nunique()
+                            else:
+                                Z_m = 0
+                                W_m = 0
+                            
+                            linhas_evol.append({
+                                'Mes': mes_lbl, '_ano': ano_m, '_mes': mes_m,
+                                'Iniciaram atraso': X_m, 'Aptos': Y_m,
+                                'MP agendada': Z_m, 'OS baixada': W_m
+                            })
+                        
+                        if linhas_evol:
+                            df_evol_plot = pd.DataFrame(linhas_evol).sort_values(['_ano', '_mes'])
+                            fig_evol = px.line(
+                                df_evol_plot, x='Mes',
+                                y=['Iniciaram atraso', 'Aptos', 'MP agendada', 'OS baixada'],
+                                markers=True, title="Evolução das etapas do funil",
+                                color_discrete_map={
+                                    'Iniciaram atraso': '#1f77b4', 'Aptos': '#17a2b8',
+                                    'MP agendada': '#ffc107', 'OS baixada': '#28a745'
+                                }
+                            )
+                            fig_evol.update_layout(yaxis_title="Contratos", xaxis_title="Mês")
+                            st.plotly_chart(fig_evol, use_container_width=True)
         except Exception as e:
-            st.error(f"Erro ao ler o histórico do funil: {e}")
+            st.error(f"Erro ao processar o funil: {e}")
 
 # === ABA 7: SEM COBERTURA DE CEP ===
 with aba_sem_cobertura:
