@@ -304,16 +304,18 @@ def carregar_dados_completos():
       AND (Contact.MobilePhone != null OR Contact.Phone != null)
     """
     # OS de Manutenção Preventiva — usada para o Funil de Conversão Mensal.
-    # A MP é identificada pelo campo Case.FOZ_TipoSolicitacao__c = 'MANUTENÇÃO PREVENTIVA'
-    # (e não pelo tipo de serviço do WorkOrder, que pode estar vazio).
-    # Limitada aos últimos 12 meses para reduzir o volume puxado.
+    # A MP é um CASE (Type='OS', FOZ_TipoSolicitacao__c='MANUTENÇÃO PREVENTIVA').
+    # Consultamos direto do Case porque o Asset está no campo customizado FOZ_Asset__c
+    # (o AssetId padrão do WorkOrder vem vazio). O código do item vem de
+    # FOZ_Asset__r.FOZ_CodigoItem__c. Limitado aos últimos 12 meses.
     query_os_mp = """
     SELECT 
-        Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.Status, Case.CreatedDate
-    FROM WorkOrder 
-    WHERE Case.Type = 'OS' 
-      AND Case.FOZ_TipoSolicitacao__c = 'MANUTENÇÃO PREVENTIVA'
-      AND Case.CreatedDate = LAST_N_MONTHS:12
+        FOZ_Asset__r.FOZ_CodigoItem__c, Status, CreatedDate
+    FROM Case 
+    WHERE Type = 'OS' 
+      AND FOZ_TipoSolicitacao__c = 'MANUTENÇÃO PREVENTIVA'
+      AND FOZ_Asset__c != null
+      AND CreatedDate = LAST_N_MONTHS:12
     """
     
     registros_ativos = sf.query_all(query_ativos).get('records', [])
@@ -583,11 +585,12 @@ def carregar_dados_completos():
     # rápido que loop Python para milhares de registros).
     if registros_os_mp:
         df_os_mp = pd.json_normalize(registros_os_mp)
-        # Renomeia colunas aninhadas para nomes simples
+        # Renomeia colunas para nomes simples. Como agora consultamos direto da tabela Case,
+        # o código do asset vem como 'FOZ_Asset__r.FOZ_CodigoItem__c' (sem prefixo 'Case.').
         rename_os = {
-            'Case.FOZ_Asset__r.FOZ_CodigoItem__c': 'CodigoItem',
-            'Case.Status': 'Status_Caso',
-            'Case.CreatedDate': 'CreatedDate',
+            'FOZ_Asset__r.FOZ_CodigoItem__c': 'CodigoItem',
+            'Status': 'Status_Caso',
+            'CreatedDate': 'CreatedDate',
         }
         df_os_mp = df_os_mp.rename(columns=rename_os)
         # Mantém só o necessário
