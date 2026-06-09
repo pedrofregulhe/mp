@@ -596,7 +596,13 @@ def carregar_dados_completos():
         # Mantém só o necessário
         cols_keep = [c for c in ['CodigoItem', 'Status_Caso', 'CreatedDate'] if c in df_os_mp.columns]
         df_os_mp = df_os_mp[cols_keep]
-        df_os_mp['CreatedDate'] = pd.to_datetime(df_os_mp['CreatedDate'], errors='coerce').dt.tz_localize(None)
+        # CreatedDate vem do Salesforce em UTC (ex: 2026-06-05T14:41:24.000+0000).
+        # Converte para o fuso de Brasília e depois remove o tz, para comparar de forma
+        # consistente com a data do snapshot (que está em horário de Brasília tz-naive).
+        # IMPORTANTE: usar utc=True no parse evita o erro de tz_localize em série já tz-aware,
+        # que estava resultando em datas nulas (NaT) e zerando o filtro de período.
+        dt_utc = pd.to_datetime(df_os_mp['CreatedDate'], errors='coerce', utc=True)
+        df_os_mp['CreatedDate'] = dt_utc.dt.tz_convert(FUSO_BR).dt.tz_localize(None)
     else:
         df_os_mp = pd.DataFrame(columns=['CodigoItem', 'Status_Caso', 'CreatedDate'])
     del registros_os_mp
@@ -1986,17 +1992,38 @@ with aba_hist:
                     with st.expander("🔧 Diagnóstico do funil (clique para validar os números)"):
                         st.write(f"**Total de OS de MP carregadas do Salesforce:** {len(df_os_mp_atual)}")
                         if not df_os_mp_atual.empty:
-                            st.write(f"**Período do filtro:** OS criadas entre {data_snap.strftime('%d/%m/%Y %H:%M')} e {fim_mes.strftime('%d/%m/%Y')}")
+                            # Mostra o range real de datas das OS carregadas
+                            dt_validas = df_os_mp_atual['CreatedDate'].dropna()
+                            st.write(f"**Datas das OS carregadas:** de {dt_validas.min()} até {dt_validas.max()}")
+                            st.write(f"**OS com data nula (NaT):** {df_os_mp_atual['CreatedDate'].isna().sum()}")
+                            st.write(f"**Período do filtro (snapshot):** de {data_snap} até {fim_mes}")
+                            st.write(f"**Tipo da coluna CreatedDate:** {df_os_mp_atual['CreatedDate'].dtype}")
+                            st.write(f"**Tipo de data_snap:** {type(data_snap).__name__} | **fim_mes:** {type(fim_mes).__name__}")
                             st.write(f"**OS de MP criadas nesse período:** {len(df_os_periodo)}")
                             st.write(f"**Dessas, de contratos aptos do snapshot:** {len(df_os_aptos)}")
-                            st.write("**Valores de Status encontrados nas OS de MP do período (use para conferir qual significa 'baixado com sucesso'):**")
+                            # Amostra de algumas datas reais para inspeção visual
+                            st.write("**Amostra de 5 OS (data + status):**")
+                            st.dataframe(
+                                df_os_mp_atual[['CodigoItem', 'CreatedDate', 'Status_Caso']].head(5),
+                                hide_index=True
+                            )
+                            # Contagem de OS por mês/ano — mostra se junho/2026 tem OS na base
+                            st.write("**OS de MP por mês (mostra se o mês do snapshot tem dados):**")
+                            df_diag = df_os_mp_atual.dropna(subset=['CreatedDate']).copy()
+                            if not df_diag.empty:
+                                df_diag['_AnoMes'] = df_diag['CreatedDate'].dt.strftime('%Y-%m')
+                                cont_mes = df_diag['_AnoMes'].value_counts().sort_index(ascending=False)
+                                st.dataframe(cont_mes.reset_index().rename(
+                                    columns={'index': 'Ano-Mês', '_AnoMes': 'Qtd OS'}
+                                ).head(15), hide_index=True)
+                            st.write("**Valores de Status encontrados nas OS de MP do período:**")
                             if not df_os_periodo.empty:
                                 contagem_status = df_os_periodo['Status_Caso'].value_counts()
                                 st.dataframe(contagem_status.reset_index().rename(
                                     columns={'index': 'Status', 'Status_Caso': 'Qtd'}
                                 ), hide_index=True)
                             else:
-                                st.warning("Nenhuma OS de MP no período. Verifique se a data do snapshot está correta.")
+                                st.warning("Nenhuma OS de MP no período. Veja as datas acima para comparar com o período do filtro.")
                         else:
                             st.error("Nenhuma OS de MP foi carregada. O filtro da query pode estar incorreto.")
                     
