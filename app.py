@@ -1990,45 +1990,6 @@ with aba_hist:
                         W = len(cods_com_sucesso)
                         aviso_os = None
                     
-                    # Diagnóstico (ajuda a validar o cálculo e calibrar o status de "sucesso")
-                    with st.expander("🔧 Diagnóstico do funil (clique para validar os números)"):
-                        st.write(f"**Total de OS de MP carregadas do Salesforce:** {len(df_os_mp_atual)}")
-                        if not df_os_mp_atual.empty:
-                            # Mostra o range real de datas das OS carregadas
-                            dt_validas = df_os_mp_atual['CreatedDate'].dropna()
-                            st.write(f"**Datas das OS carregadas:** de {dt_validas.min()} até {dt_validas.max()}")
-                            st.write(f"**OS com data nula (NaT):** {df_os_mp_atual['CreatedDate'].isna().sum()}")
-                            st.write(f"**Período do filtro (snapshot):** de {data_snap} até {fim_mes}")
-                            st.write(f"**Tipo da coluna CreatedDate:** {df_os_mp_atual['CreatedDate'].dtype}")
-                            st.write(f"**Tipo de data_snap:** {type(data_snap).__name__} | **fim_mes:** {type(fim_mes).__name__}")
-                            st.write(f"**OS de MP criadas nesse período:** {len(df_os_periodo)}")
-                            st.write(f"**Dessas, de contratos aptos do snapshot:** {len(df_os_aptos)}")
-                            # Amostra de algumas datas reais para inspeção visual
-                            st.write("**Amostra de 5 OS (data + status):**")
-                            st.dataframe(
-                                df_os_mp_atual[['CodigoItem', 'CreatedDate', 'Status_Caso']].head(5),
-                                hide_index=True
-                            )
-                            # Contagem de OS por mês/ano — mostra se junho/2026 tem OS na base
-                            st.write("**OS de MP por mês (mostra se o mês do snapshot tem dados):**")
-                            df_diag = df_os_mp_atual.dropna(subset=['CreatedDate']).copy()
-                            if not df_diag.empty:
-                                df_diag['_AnoMes'] = df_diag['CreatedDate'].dt.strftime('%Y-%m')
-                                cont_mes = df_diag['_AnoMes'].value_counts().sort_index(ascending=False)
-                                st.dataframe(cont_mes.reset_index().rename(
-                                    columns={'index': 'Ano-Mês', '_AnoMes': 'Qtd OS'}
-                                ).head(15), hide_index=True)
-                            st.write("**Valores de Status encontrados nas OS de MP do período:**")
-                            if not df_os_periodo.empty:
-                                contagem_status = df_os_periodo['Status_Caso'].value_counts()
-                                st.dataframe(contagem_status.reset_index().rename(
-                                    columns={'index': 'Status', 'Status_Caso': 'Qtd'}
-                                ), hide_index=True)
-                            else:
-                                st.warning("Nenhuma OS de MP no período. Veja as datas acima para comparar com o período do filtro.")
-                        else:
-                            st.error("Nenhuma OS de MP foi carregada. O filtro da query pode estar incorreto.")
-                    
                     if aviso_os:
                         st.warning(aviso_os)
                     
