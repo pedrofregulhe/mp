@@ -306,8 +306,10 @@ def carregar_dados_completos():
     # OS de Manutenção Preventiva — usada para o Funil de Conversão Mensal.
     # A MP é um CASE (Type='OS', FOZ_TipoSolicitacao__c='MANUTENÇÃO PREVENTIVA').
     # Consultamos direto do Case porque o Asset está no campo customizado FOZ_Asset__c
-    # (o AssetId padrão do WorkOrder vem vazio). O código do item vem de
-    # FOZ_Asset__r.FOZ_CodigoItem__c. Limitado aos últimos 12 meses.
+    # (o AssetId padrão do WorkOrder vem vazio). O código do item vem de FOZ_Asset__r.FOZ_CodigoItem__c.
+    # ATENÇÃO: LAST_N_MONTHS:12 NÃO inclui o mês corrente no Salesforce — ele vai até o
+    # último dia do mês passado. Por isso adicionamos OR CreatedDate = THIS_MONTH, senão
+    # o funil do mês atual fica sempre zerado (as OS recém-criadas ficam de fora).
     query_os_mp = """
     SELECT 
         FOZ_Asset__r.FOZ_CodigoItem__c, Status, CreatedDate
@@ -315,7 +317,7 @@ def carregar_dados_completos():
     WHERE Type = 'OS' 
       AND FOZ_TipoSolicitacao__c = 'MANUTENÇÃO PREVENTIVA'
       AND FOZ_Asset__c != null
-      AND CreatedDate = LAST_N_MONTHS:12
+      AND (CreatedDate = LAST_N_MONTHS:12 OR CreatedDate = THIS_MONTH)
     """
     
     registros_ativos = sf.query_all(query_ativos).get('records', [])
