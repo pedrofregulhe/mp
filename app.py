@@ -304,15 +304,15 @@ def carregar_dados_completos():
       AND (Contact.MobilePhone != null OR Contact.Phone != null)
     """
     # OS de Manutenção Preventiva — usada para o Funil de Conversão Mensal.
-    # Limitada aos últimos 12 meses (LAST_N_MONTHS:12) para reduzir o volume puxado —
-    # o funil só precisa do período coberto pelos snapshots mais recentes.
-    # Campos enxutos: só os realmente consumidos no cálculo do funil.
+    # A MP é identificada pelo campo Case.FOZ_TipoSolicitacao__c = 'MANUTENÇÃO PREVENTIVA'
+    # (e não pelo tipo de serviço do WorkOrder, que pode estar vazio).
+    # Limitada aos últimos 12 meses para reduzir o volume puxado.
     query_os_mp = """
     SELECT 
         Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.Status, Case.CreatedDate
     FROM WorkOrder 
     WHERE Case.Type = 'OS' 
-      AND FOZ_Tipo_de_Servico__c LIKE '%MP%'
+      AND Case.FOZ_TipoSolicitacao__c = 'MANUTENÇÃO PREVENTIVA'
       AND Case.CreatedDate = LAST_N_MONTHS:12
     """
     
@@ -1978,6 +1978,24 @@ with aba_hist:
                         cods_com_sucesso = set(df_os_sucesso['CodigoItem'].dropna().astype(str))
                         W = len(cods_com_sucesso)
                         aviso_os = None
+                    
+                    # Diagnóstico (ajuda a validar o cálculo e calibrar o status de "sucesso")
+                    with st.expander("🔧 Diagnóstico do funil (clique para validar os números)"):
+                        st.write(f"**Total de OS de MP carregadas do Salesforce:** {len(df_os_mp_atual)}")
+                        if not df_os_mp_atual.empty:
+                            st.write(f"**Período do filtro:** OS criadas entre {data_snap.strftime('%d/%m/%Y %H:%M')} e {fim_mes.strftime('%d/%m/%Y')}")
+                            st.write(f"**OS de MP criadas nesse período:** {len(df_os_periodo)}")
+                            st.write(f"**Dessas, de contratos aptos do snapshot:** {len(df_os_aptos)}")
+                            st.write("**Valores de Status encontrados nas OS de MP do período (use para conferir qual significa 'baixado com sucesso'):**")
+                            if not df_os_periodo.empty:
+                                contagem_status = df_os_periodo['Status_Caso'].value_counts()
+                                st.dataframe(contagem_status.reset_index().rename(
+                                    columns={'index': 'Status', 'Status_Caso': 'Qtd'}
+                                ), hide_index=True)
+                            else:
+                                st.warning("Nenhuma OS de MP no período. Verifique se a data do snapshot está correta.")
+                        else:
+                            st.error("Nenhuma OS de MP foi carregada. O filtro da query pode estar incorreto.")
                     
                     if aviso_os:
                         st.warning(aviso_os)
