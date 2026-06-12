@@ -37,7 +37,7 @@ FUSO_BR = pytz.timezone('America/Sao_Paulo')
 st.set_page_config(
     page_title="Manutenção Preventiva", 
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # --- FUNÇÃO DE ESTILO PARA GRÁFICOS ---
@@ -125,8 +125,7 @@ st.markdown("""
     hr{ border-color:var(--line); }
 </style>
 """, unsafe_allow_html=True)
-st.markdown("<h1>📊 Manutenção Preventiva</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: #666;'>Visão executiva de atraso, priorização status financeiro, agendamentos e distribuição por franquias e regiões de atendimento.</p>", unsafe_allow_html=True)
+
 
 # ==========================================
 # 2. FUNÇÕES DE TRATAMENTO E UI
@@ -815,24 +814,26 @@ with st.sidebar:
 if classificacoes_selecionadas:
     df_final = df_final[df_final['Classificacao'].isin(classificacoes_selecionadas)].copy()
 
-# Indicador de última atualização
+# Indicador de última atualização na sidebar
 ts_carga = df_final.attrs.get('timestamp_carga', 'desconhecido')
 falhas_parse = df_final.attrs.get('falhas_parse_data', 0)
 total_reg_original = df_final.attrs.get('total_registros', len(df_final))
 total_reg_filtrado = len(df_final)
-info_msg = f"🕒 Dados atualizados em <b>{ts_carga}</b> &nbsp;|&nbsp; "
-if classificacoes_selecionadas:
-    info_msg += f"{total_reg_filtrado:,} registros (filtrado de {total_reg_original:,}) &nbsp;|&nbsp; ".replace(",", ".")
-else:
-    info_msg += f"{total_reg_original:,} registros &nbsp;|&nbsp; ".replace(",", ".")
-info_msg += "cache válido por 6h"
-if ts_capacidade:
-    info_msg += f" &nbsp;|&nbsp; 📂 Capacidade.xlsx: <b>{ts_capacidade}</b>"
-if falhas_parse > 0:
-    info_msg += f" &nbsp;|&nbsp; ⚠️ {falhas_parse} datas de OS não puderam ser parseadas"
-if classificacoes_selecionadas:
-    info_msg += f" &nbsp;|&nbsp; 🎯 Classificação: <b>{', '.join(classificacoes_selecionadas)}</b>"
-st.markdown(f"<p style='color: #555; font-size: 12px;'>{info_msg}</p>", unsafe_allow_html=True)
+
+with st.sidebar:
+    st.markdown("---")
+    st.markdown("<h4 style='font-size:0.9rem; margin-bottom:5px; color:#16233F;'>Status dos Dados</h4>", unsafe_allow_html=True)
+    info_msg = f"<p style='font-size:0.75rem; color:#647393; line-height:1.4;'>🕒 <b>Atualizado:</b> {ts_carga}<br>"
+    if classificacoes_selecionadas:
+        info_msg += f"📊 <b>Registros:</b> {total_reg_filtrado:,} (de {total_reg_original:,})<br>".replace(",", ".")
+    else:
+        info_msg += f"📊 <b>Registros:</b> {total_reg_original:,}<br>".replace(",", ".")
+    if ts_capacidade:
+        info_msg += f"📂 <b>Capacidade.xlsx:</b> {ts_capacidade}<br>"
+    if falhas_parse > 0:
+        info_msg += f"⚠️ <b>Erro:</b> {falhas_parse} OS não parseadas<br>"
+    info_msg += "</p>"
+    st.markdown(info_msg, unsafe_allow_html=True)
 
 df_ativos_reais = df_final[df_final['Atraso_Base'] != AtrasoBase.ISENTO].copy()
 df_ativos_filtrado = df_ativos_reais.copy()  # mantido para compatibilidade com código abaixo
@@ -865,15 +866,15 @@ if erro_arquivos_estaveis and not prestador_mapeado:
 # 8. RENDERIZAÇÃO DAS ABAS
 # ==========================================
 aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_hist, aba_sem_cobertura, aba_consulta = st.tabs([
-    "📊 Visão Executiva", 
-    "🏢 Visão por Franquias", 
-    "⚖️ Atraso vs Capacidade",
-    "📅 Capacidade Diária",
-    "✉️ Mailing Acionável",
-    "🎯 M0",
-    "🔻 Funil Mensal",
-    "📍 Sem Cobertura de CEP",
-    "🔍 Consulta de Asset"
+    "Visão Executiva", 
+    "Visão por Franquias", 
+    "Atraso vs Capacidade",
+    "Capacidade Diária",
+    "Mailing Acionável",
+    "M0",
+    "Funil Mensal",
+    "Sem Cobertura de CEP",
+    "Consulta de Asset"
 ])
 
 # === ABA 1: DASHBOARD EXECUTIVO ===
