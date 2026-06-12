@@ -40,103 +40,91 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# --- FUNÇÃO DE ESTILO PARA GRÁFICOS ---
+def aplicar_tema_moderno(fig, cores_azuis=None):
+    if cores_azuis is None:
+        cores_azuis = ['#0A2A66', '#1E5FCC', '#3B82F6', '#60A5FA', '#93C5FD', '#1E40AF', '#2563EB']
+
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family="Inter, sans-serif", size=12, color='#16233F'),
+        title_font=dict(family="Inter, sans-serif", size=16, color='#0A2A66'),
+        colorway=cores_azuis,
+        legend=dict(font=dict(color='#16233F')),
+        hoverlabel=dict(font=dict(family="Inter, sans-serif"), bgcolor='#0A2A66'),
+        margin=dict(t=48, l=10, r=10, b=10),
+    )
+    if fig.layout.title.text is None:
+        fig.update_layout(title_text="")
+    fig.update_traces(marker_cornerradius=8, selector=dict(type='bar'))
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#E4EBF6', zeroline=False)
+    fig.update_xaxes(showgrid=False)
+    return fig
+
 st.markdown("""
 <style>
-/* Esconder a sidebar completamente — painel executivo, sem ruído operacional */
-section[data-testid="stSidebar"] { display: none !important; }
-button[kind="header"] { display: none !important; }
-div[data-testid="collapsedControl"] { display: none !important; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    :root{
+        --navy:#0A2A66; --blue:#1E5FCC; --blue2:#3B82F6; --blue-soft:#EAF1FB;
+        --ink:#16233F; --muted:#647393; --line:#E4EBF6; --bg:#F4F7FD; --card:#FFFFFF;
+    }
+    html{ font-size:13px; }
+    html, body, [class*="css"], .stApp, [data-testid="stAppViewContainer"] * { font-family:'Inter', sans-serif; }
+    [data-testid="stAppViewContainer"]{ background:var(--bg); }
+    [data-testid="stHeader"]{ background:rgba(0,0,0,0); height:0; }
+    .block-container{ padding-top:1.6rem; padding-bottom:2rem; max-width:1600px; }
+    h1,h2,h3,h4{ color:var(--navy); font-weight:700; letter-spacing:-0.01em; }
+    h2{ font-size:1.22rem !important; }
+    h3{ font-size:1.0rem !important; }
+    [data-testid="stMarkdownContainer"] p{ font-size:0.9rem; }
 
-/* Esconder o header padrão do Streamlit (barra cinza com menu hamburguer no topo) */
-header[data-testid="stHeader"] { display: none !important; }
-#MainMenu { display: none !important; }
-footer { display: none !important; }
+    /* Sidebar */
+    [data-testid="stSidebar"]{ background:var(--card); border-right:1px solid var(--line); }
+    [data-testid="stSidebar"] .block-container{ padding-top:1rem; }
+    [data-testid="stSidebar"] h1{ font-size:1.3rem; color:var(--navy); font-weight:800; text-align:center; margin:.3rem 0 .2rem; }
+    [data-testid="stSidebar"] h2{ font-size:.9rem !important; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; }
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span{ color:var(--ink); }
+    [data-testid="stSidebar"] img{ border-radius:8px; }
 
-/* Como o header foi removido, o conteúdo principal pode subir um pouco */
-div[data-testid="stAppViewContainer"] > .main { padding-top: 0 !important; }
+    /* KPI cards (compactos) */
+    .kpi-container{
+        background:var(--card); border:1px solid var(--line); border-radius:12px;
+        padding:11px 8px 9px; text-align:center;
+        box-shadow:0 1px 2px rgba(16,40,90,.04), 0 8px 20px rgba(16,40,90,.05);
+        transition:transform .2s ease, box-shadow .2s ease;
+        height:102px; display:flex; flex-direction:column; justify-content:center;
+        position:relative; overflow:hidden; margin-bottom: 1rem;
+    }
+    .kpi-container::before{ content:""; position:absolute; top:0; left:0; right:0; height:3px; background:linear-gradient(90deg,var(--navy),var(--blue2)); }
+    .kpi-container:hover{ transform:translateY(-3px); box-shadow:0 2px 4px rgba(16,40,90,.06), 0 14px 28px rgba(16,40,90,.10); }
+    .kpi-title{ font-size:.62rem; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; margin-bottom:5px; line-height:1.15; }
+    .kpi-value{ font-size:1.25rem; color:var(--navy); font-weight:800; line-height:1.05; }
+    .kpi-sub-value{ font-size:.62rem; color:var(--muted); margin-top:4px; }
+    .kpi-delta{ font-size:.64rem; font-weight:700; }
+    .kpi-value.positive, .kpi-delta.positive{ color:#0E9F6E; }
+    .kpi-value.negative, .kpi-delta.negative{ color:#E02424; }
 
-/* Botão de atualizar discreto no canto superior */
-div[data-testid="stButton"] > button[kind="secondary"] {
-    background-color: transparent;
-    border: 1px solid #cbd5e1;
-    color: #475569;
-    font-size: 12px;
-    padding: 4px 12px;
-    height: auto;
-}
-div[data-testid="stButton"] > button[kind="secondary"]:hover {
-    background-color: #f1f5f9;
-    border-color: #94a3b8;
-    color: #1e293b;
-}
+    /* Tabs */
+    [data-baseweb="tab-list"]{ gap:3px; border-bottom:1px solid var(--line); }
+    [data-baseweb="tab-list"] button{ border-radius:9px 9px 0 0; padding:7px 13px; color:var(--muted); font-weight:600; font-size:.85rem; }
+    [data-baseweb="tab-list"] button:hover{ background:var(--blue-soft); color:var(--navy); }
+    [data-baseweb="tab-list"] button[aria-selected="true"]{ background:var(--blue-soft); color:var(--navy); border-bottom:3px solid var(--blue); font-weight:700; }
 
-/* Ajuste de Títulos */
-h1 { font-size: 1.5rem !important; font-weight: 700 !important; margin-bottom: 0px !important; padding-bottom: 5px !important; }
-h3 { font-size: 1.1rem !important; margin-top: 5px !important; margin-bottom: 5px !important; color: #333; }
-h4 { font-size: 0.95rem !important; color: #444; margin-bottom: 10px !important; font-weight: 600 !important; }
-p { font-size: 0.85rem !important; margin-bottom: 5px !important;}
+    /* Dataframe */
+    [data-testid="stDataFrame"]{ border:1px solid var(--line); border-radius:10px; overflow:hidden; box-shadow:0 5px 14px rgba(16,40,90,.05); }
 
-/* Card individual para cada KPI */
-div[data-testid="stMetric"] {
-    background-color: #ffffff;
-    border: 1px solid #cbd5e1;
-    padding: 12px 15px;
-    border-radius: 8px;
-    box-shadow: 0px 2px 4px rgba(0,0,0,0.03);
-    display: flex;
-    flex-direction: column;
-    height: 110px; 
-}
+    /* Metric widget (fallback) */
+    [data-testid="stMetric"]{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px; box-shadow:0 5px 14px rgba(16,40,90,.05); }
+    [data-testid="stMetricLabel"] p{ color:var(--muted); font-weight:600; font-size:.8rem; }
+    [data-testid="stMetricValue"]{ color:var(--navy); font-weight:800; font-size:1.4rem; }
 
-/* Rótulo do KPI (texto pequeno acima do número) */
-div[data-testid="stMetricLabel"],
-div[data-testid="stMetricLabel"] p,
-div[data-testid="stMetricLabel"] label,
-div[data-testid="metric-container"] label {
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    color: #475569 !important;
-    margin-bottom: 2px !important;
-}
-
-/* Valor do KPI (número grande) — em NEGRITO forte */
-div[data-testid="stMetricValue"],
-div[data-testid="stMetricValue"] > div,
-div[data-testid="metric-container"] > div > div {
-    font-size: 22px !important;
-    font-weight: 800 !important;
-    color: #0f172a !important;
-}
-
-/* Delta do KPI (descrição abaixo do número) */
-div[data-testid="stMetricDelta"],
-div[data-testid="stMetricDelta"] > div {
-    font-size: 10px !important;
-    font-weight: 600 !important;
-}
-
-div.block-container { padding-top: 1.2rem; padding-bottom: 1.2rem; }
-div[data-testid="metric-container"] {
-    background-color: transparent !important;
-    border: none !important;
-    padding: 0 !important;
-    box-shadow: none !important;
-}
-/* Multiselect no topo: deixar mais compacto e visualmente discreto */
-div[data-testid="stMultiSelect"] label { 
-    font-size: 11px !important; 
-    font-weight: 600 !important; 
-    color: #475569 !important; 
-    margin-bottom: 2px !important;
-}
-div[data-testid="stMultiSelect"] > div > div { 
-    min-height: 32px !important; 
-    font-size: 12px !important;
-}
+    /* Buttons & inputs */
+    .stButton>button, .stDownloadButton>button{ background:var(--navy); color:#fff; border:none; border-radius:9px; padding:.45rem .9rem; font-weight:600; }
+    .stButton>button:hover{ background:var(--blue); color:#fff; }
+    hr{ border-color:var(--line); }
 </style>
 """, unsafe_allow_html=True)
-
-# Topo: apenas o título e subtítulo (controles ficam abaixo, após a carga dos dados)
 st.markdown("<h1>📊 Manutenção Preventiva</h1>", unsafe_allow_html=True)
 st.markdown("<p style='color: #666;'>Visão executiva de atraso, priorização status financeiro, agendamentos e distribuição por franquias e regiões de atendimento.</p>", unsafe_allow_html=True)
 
@@ -792,17 +780,23 @@ with st.spinner("Conectando ao Salesforce e consolidando KPIs..."):
     df_final = carregar_dados_completos()
 
 # ==========================================
-# 5.1. BARRA DE CONTROLES (filtro global + botão atualizar)
+# 5.1. BARRA LATERAL (logo, filtros globais e atualizacao)
 # ==========================================
-# Filtro e botão compactos, alinhados à esquerda logo abaixo do título.
-# Proporção 3 / 1 / 8: filtro compacto / botão estreito / muito espaço livre à direita,
-# para que o conjunto fique próximo do título e não pareça flutuando no meio da tela.
-classificacoes_disponiveis = sorted(
-    [c for c in df_final['Classificacao'].dropna().unique() if c and c != 'Não Classificado']
-) + (['Não Classificado'] if (df_final['Classificacao'] == 'Não Classificado').any() else [])
+with st.sidebar:
+    _logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+    if os.path.exists(_logo_path):
+        _lc1, _lc2, _lc3 = st.columns([1, 2, 1])
+        with _lc2:
+            st.image(_logo_path, use_container_width=True)
+            
+    st.markdown("<h1 style='text-align:center; margin:0.3rem 0 0.2rem; font-weight:800;'>Painel de MP</h1>", unsafe_allow_html=True)
+    
+    st.header("Filtros")
+    
+    classificacoes_disponiveis = sorted(
+        [c for c in df_final['Classificacao'].dropna().unique() if c and c != 'Não Classificado']
+    ) + (['Não Classificado'] if (df_final['Classificacao'] == 'Não Classificado').any() else [])
 
-col_filtro, col_btn, col_espaco = st.columns([3, 1, 8])
-with col_filtro:
     classificacoes_selecionadas = st.multiselect(
         "Classificação do Contrato",
         options=classificacoes_disponiveis,
@@ -811,9 +805,9 @@ with col_filtro:
         key="filtro_classificacao_global",
         help="Filtra todos os indicadores e abas por uma ou mais classificações de contrato. Vazio = todas."
     )
-with col_btn:
-    st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
-    if st.button("🔄 Atualizar", key="btn_atualizar_topo", help="Recarrega os dados do Salesforce e os arquivos de capacidade"):
+    
+    st.write("")
+    if st.button("🔄 Atualizar Dados", key="btn_atualizar_topo", help="Recarrega os dados do Salesforce e os arquivos de capacidade", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
@@ -899,13 +893,13 @@ with aba_dashboard:
     with st.container(border=True):
         st.markdown("#### 🌐 Base Ativa Total")
         col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
-        col1.metric("Volume da Carteira", f"{tot_cons:,}".replace(",", "."), "Geral")
-        col2.metric("MP Em Dia", f"{tot_cons_em_dia:,}".replace(",", "."))
-        col3.metric("Atraso Consolidado", f"{tot_cons_atraso:,}".replace(",", "."), f"{perc_cons_atraso:.1f}% da base", delta_color="inverse")
-        col4.metric("Atraso", f"{tot_cons_critico:,}".replace(",", "."), "Sem Ação", delta_color="off")
-        col5.metric("Prog. p/ Zerar (Mês)", f"{tot_cons_prog:,}".replace(",", "."), "OS Válidas", delta_color="normal")
-        col6.metric("Agendado p/ HOJE", f"{tot_cons_hoje:,}".replace(",", "."), "Esforço diário", delta_color="normal")
-        col7.metric("Projeção Pós-Baixas", f"{perc_cons_proj:.1f}%", "Estimativa Final", delta_color="normal")
+        col1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Volume da Carteira"}</div><div class="kpi-value">{f"{tot_cons:,}".replace(",", ".")}</div><div class="kpi-delta">{"Geral"}</div></div>''', unsafe_allow_html=True)
+        col2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"MP Em Dia"}</div><div class="kpi-value">{f"{tot_cons_em_dia:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+        col3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Atraso Consolidado"}</div><div class="kpi-value">{f"{tot_cons_atraso:,}".replace(",", ".")}</div><div class="kpi-delta">{f"{perc_cons_atraso:.1f}% da base"}</div></div>''', unsafe_allow_html=True)
+        col4.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Atraso"}</div><div class="kpi-value">{f"{tot_cons_critico:,}".replace(",", ".")}</div><div class="kpi-delta">{"Sem Ação"}</div></div>''', unsafe_allow_html=True)
+        col5.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Prog. p/ Zerar (Mês)"}</div><div class="kpi-value">{f"{tot_cons_prog:,}".replace(",", ".")}</div><div class="kpi-delta">{"OS Válidas"}</div></div>''', unsafe_allow_html=True)
+        col6.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Agendado p/ HOJE"}</div><div class="kpi-value">{f"{tot_cons_hoje:,}".replace(",", ".")}</div><div class="kpi-delta">{"Esforço diário"}</div></div>''', unsafe_allow_html=True)
+        col7.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Projeção Pós-Baixas"}</div><div class="kpi-value">{f"{perc_cons_proj:.1f}%"}</div><div class="kpi-delta">{"Estimativa Final"}</div></div>''', unsafe_allow_html=True)
         with st.expander("📄 Extrato Rápido: Atrasos (Base Total)"):
             exibir_extrato_resumido(df_view_dash[df_view_dash['Atraso_Base'] == AtrasoBase.ATRASADO], key_download="base_total")
 
@@ -925,13 +919,13 @@ with aba_dashboard:
     with st.container(border=True):
         st.markdown("#### ✅ Contratos Adimplentes")
         colA1, colA2, colA3, colA4, colA5, colA6, colA7 = st.columns(7)
-        colA1.metric("Volume Adimplente", f"{tot_adim:,}".replace(",", "."))
-        colA2.metric("MP Em Dia", f"{tot_adim_em_dia:,}".replace(",", "."))
-        colA3.metric("Atraso Adimplente", f"{tot_adim_atraso:,}".replace(",", "."), f"{perc_adim_atraso:.1f}% do segmento", delta_color="inverse")
-        colA4.metric("Atraso", f"{tot_adim_critico:,}".replace(",", "."), "Prioridade Alta", delta_color="off")
-        colA5.metric("Prog. p/ Zerar (Mês)", f"{tot_adim_prog:,}".replace(",", "."), "OS Válidas", delta_color="normal")
-        colA6.metric("Agendado p/ HOJE", f"{tot_adim_hoje:,}".replace(",", "."), "Esforço diário", delta_color="normal")
-        colA7.metric("Projeção Pós-Baixas", f"{perc_adim_proj:.1f}%", "Estimativa Final", delta_color="normal")
+        colA1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Volume Adimplente"}</div><div class="kpi-value">{f"{tot_adim:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+        colA2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"MP Em Dia"}</div><div class="kpi-value">{f"{tot_adim_em_dia:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+        colA3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Atraso Adimplente"}</div><div class="kpi-value">{f"{tot_adim_atraso:,}".replace(",", ".")}</div><div class="kpi-delta">{f"{perc_adim_atraso:.1f}% do segmento"}</div></div>''', unsafe_allow_html=True)
+        colA4.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Atraso"}</div><div class="kpi-value">{f"{tot_adim_critico:,}".replace(",", ".")}</div><div class="kpi-delta">{"Prioridade Alta"}</div></div>''', unsafe_allow_html=True)
+        colA5.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Prog. p/ Zerar (Mês)"}</div><div class="kpi-value">{f"{tot_adim_prog:,}".replace(",", ".")}</div><div class="kpi-delta">{"OS Válidas"}</div></div>''', unsafe_allow_html=True)
+        colA6.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Agendado p/ HOJE"}</div><div class="kpi-value">{f"{tot_adim_hoje:,}".replace(",", ".")}</div><div class="kpi-delta">{"Esforço diário"}</div></div>''', unsafe_allow_html=True)
+        colA7.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Projeção Pós-Baixas"}</div><div class="kpi-value">{f"{perc_adim_proj:.1f}%"}</div><div class="kpi-delta">{"Estimativa Final"}</div></div>''', unsafe_allow_html=True)
         with st.expander("📄 Extrato Rápido: Atrasos (Adimplentes)"):
             exibir_extrato_resumido(df_adim[df_adim['Atraso_Base'] == AtrasoBase.ATRASADO], key_download="adimplentes")
 
@@ -951,13 +945,13 @@ with aba_dashboard:
     with st.container(border=True):
         st.markdown("#### ⚠️ Contratos Inadimplentes")
         colI1, colI2, colI3, colI4, colI5, colI6, colI7 = st.columns(7)
-        colI1.metric("Volume Inadimplente", f"{tot_inadim:,}".replace(",", "."))
-        colI2.metric("MP Em Dia", f"{tot_inadim_em_dia:,}".replace(",", "."))
-        colI3.metric("Atraso Inadimplente", f"{tot_inadim_atraso:,}".replace(",", "."), f"{perc_inadim_atraso:.1f}% do segmento", delta_color="inverse")
-        colI4.metric("Atraso", f"{tot_inadim_critico:,}".replace(",", "."), "Sem Ação", delta_color="off")
-        colI5.metric("Prog. p/ Zerar (Mês)", f"{tot_inadim_prog:,}".replace(",", "."), "OS Válidas", delta_color="normal")
-        colI6.metric("Agendado p/ HOJE", f"{tot_inadim_hoje:,}".replace(",", "."), "Esforço diário", delta_color="normal")
-        colI7.metric("Projeção Pós-Baixas", f"{perc_inadim_proj:.1f}%", "Estimativa Final", delta_color="normal")
+        colI1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Volume Inadimplente"}</div><div class="kpi-value">{f"{tot_inadim:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+        colI2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"MP Em Dia"}</div><div class="kpi-value">{f"{tot_inadim_em_dia:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+        colI3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Atraso Inadimplente"}</div><div class="kpi-value">{f"{tot_inadim_atraso:,}".replace(",", ".")}</div><div class="kpi-delta">{f"{perc_inadim_atraso:.1f}% do segmento"}</div></div>''', unsafe_allow_html=True)
+        colI4.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Atraso"}</div><div class="kpi-value">{f"{tot_inadim_critico:,}".replace(",", ".")}</div><div class="kpi-delta">{"Sem Ação"}</div></div>''', unsafe_allow_html=True)
+        colI5.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Prog. p/ Zerar (Mês)"}</div><div class="kpi-value">{f"{tot_inadim_prog:,}".replace(",", ".")}</div><div class="kpi-delta">{"OS Válidas"}</div></div>''', unsafe_allow_html=True)
+        colI6.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Agendado p/ HOJE"}</div><div class="kpi-value">{f"{tot_inadim_hoje:,}".replace(",", ".")}</div><div class="kpi-delta">{"Esforço diário"}</div></div>''', unsafe_allow_html=True)
+        colI7.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Projeção Pós-Baixas"}</div><div class="kpi-value">{f"{perc_inadim_proj:.1f}%"}</div><div class="kpi-delta">{"Estimativa Final"}</div></div>''', unsafe_allow_html=True)
         with st.expander("📄 Extrato Rápido: Atrasos (Inadimplentes)"):
             exibir_extrato_resumido(df_inadim[df_inadim['Atraso_Base'] == AtrasoBase.ATRASADO], key_download="inadimplentes")
 
@@ -1077,7 +1071,7 @@ with aba_franquias:
                         colunas_faixas = st.columns(6)
                         for col, faixa in zip(colunas_faixas, faixas_ordem):
                             qtd = int(quebra_aging.loc[franq, faixa])
-                            col.metric(rename_faixas[faixa], f"{qtd:,}".replace(",", "."))
+                            col.markdown(f'''<div class="kpi-container"><div class="kpi-title">{rename_faixas[faixa]}</div><div class="kpi-value">{f"{qtd:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
                         
                         # Linha resumo: contagem por status (programado vs sem ação)
                         df_franq_atr = df_atrasados_view[df_atrasados_view['FOZ_EndFranquiaForm__c'] == franq]
@@ -1161,9 +1155,9 @@ with aba_capacidade:
             gap_total = tot_cap - tot_atr
             
             col_sp1, col_c1, col_c2, col_c3, col_sp2 = st.columns([1, 2, 2, 2, 1])
-            col_c1.metric("Volume Atrasado (Mapeado)", f"{tot_atr:,}".replace(",", "."))
-            col_c2.metric("Capacidade Livre (MP)", f"{tot_cap:,}".replace(",", "."))
-            col_c3.metric("GAP Global", f"{gap_total:,}".replace(",", "."), "Capacidade vs Atraso", delta_color="normal" if gap_total >= 0 else "inverse")
+            col_c1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Volume Atrasado (Mapeado)"}</div><div class="kpi-value">{f"{tot_atr:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+            col_c2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Capacidade Livre (MP)"}</div><div class="kpi-value">{f"{tot_cap:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+            col_c3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"GAP Global"}</div><div class="kpi-value">{f"{gap_total:,}".replace(",", ".")}</div><div class="kpi-delta">{"Capacidade vs Atraso"}</div></div>''', unsafe_allow_html=True)
             
             st.markdown("---")
             st.markdown("**Tabela de Dimensionamento de Rotas**")
@@ -1414,13 +1408,10 @@ with aba_mailing:
                     qtd_franquias_afetadas = df_nao_acionados['Prestador_CEP'].nunique()
                     
                     col_k1, col_k2, col_k3, col_k4 = st.columns(4)
-                    col_k1.metric("Total não acionados", f"{qtd_total_nao_acionados:,}".replace(",", "."), 
-                                 "Contratos perdidos no recorte", delta_color="inverse")
-                    col_k2.metric("Excedente de capacidade", f"{qtd_excedente:,}".replace(",", "."),
-                                 "Franquia tem vaga, mas não p/ todos", delta_color="off")
-                    col_k3.metric("Franquia sem vagas", f"{qtd_sem_vagas:,}".replace(",", "."),
-                                 "Zero capacidade na região", delta_color="inverse")
-                    col_k4.metric("Franquias afetadas", f"{qtd_franquias_afetadas:,}".replace(",", "."))
+                    col_k1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Total não acionados"}</div><div class="kpi-value">{f"{qtd_total_nao_acionados:,}".replace(",", ".")}</div><div class="kpi-delta">{"Contratos perdidos no recorte"}</div></div>''', unsafe_allow_html=True)
+                    col_k2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Excedente de capacidade"}</div><div class="kpi-value">{f"{qtd_excedente:,}".replace(",", ".")}</div><div class="kpi-delta">{"Franquia tem vaga, mas não p/ todos"}</div></div>''', unsafe_allow_html=True)
+                    col_k3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Franquia sem vagas"}</div><div class="kpi-value">{f"{qtd_sem_vagas:,}".replace(",", ".")}</div><div class="kpi-delta">{"Zero capacidade na região"}</div></div>''', unsafe_allow_html=True)
+                    col_k4.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Franquias afetadas"}</div><div class="kpi-value">{f"{qtd_franquias_afetadas:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
                     
                     st.write("")
                     
@@ -1532,12 +1523,12 @@ with aba_m0:
         with st.container(border=True):
             st.markdown(f"#### 📊 Resumo M0 — {nome_mes_alvo}")
             col1, col2, col3, col4, col5, col6 = st.columns(6)
-            col1.metric("Contratos no M0", f"{total_m0:,}".replace(",", "."), "Vencendo no mês")
-            col2.metric("Clientes únicos", f"{clientes_unicos:,}".replace(",", "."))
-            col3.metric("Adimplentes", f"{adim_m0:,}".replace(",", "."))
-            col4.metric("Inadimplentes", f"{inadim_m0:,}".replace(",", "."))
-            col5.metric("Com OS aberta", f"{com_os_m0:,}".replace(",", "."), "Já em ação", delta_color="normal")
-            col6.metric("Sem OS aberta", f"{sem_os_m0:,}".replace(",", "."), "Pendente", delta_color="off")
+            col1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Contratos no M0"}</div><div class="kpi-value">{f"{total_m0:,}".replace(",", ".")}</div><div class="kpi-delta">{"Vencendo no mês"}</div></div>''', unsafe_allow_html=True)
+            col2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Clientes únicos"}</div><div class="kpi-value">{f"{clientes_unicos:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+            col3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Adimplentes"}</div><div class="kpi-value">{f"{adim_m0:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+            col4.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Inadimplentes"}</div><div class="kpi-value">{f"{inadim_m0:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+            col5.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Com OS aberta"}</div><div class="kpi-value">{f"{com_os_m0:,}".replace(",", ".")}</div><div class="kpi-delta">{"Já em ação"}</div></div>''', unsafe_allow_html=True)
+            col6.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Sem OS aberta"}</div><div class="kpi-value">{f"{sem_os_m0:,}".replace(",", ".")}</div><div class="kpi-delta">{"Pendente"}</div></div>''', unsafe_allow_html=True)
         
         st.write("")
         
@@ -1900,6 +1891,7 @@ with aba_hist:
                         margin={"t": 50, "b": 20, "l": 20, "r": 20},
                         height=400
                     )
+                    fig_funil = aplicar_tema_moderno(fig_funil)
                     st.plotly_chart(fig_funil, use_container_width=True)
                     
                     # KPIs de conversão
@@ -1907,9 +1899,9 @@ with aba_hist:
                     conv_xy = (Y / X * 100) if X > 0 else 0
                     conv_yz = (Z / Y * 100) if Y > 0 else 0
                     conv_zw = (W / Z * 100) if Z > 0 else 0
-                    col_c1.metric("Atraso → Aptos", f"{conv_xy:.1f}%", f"{Y} de {X}")
-                    col_c2.metric("Aptos → Agendados", f"{conv_yz:.1f}%", f"{Z} de {Y}")
-                    col_c3.metric("Agendados → Baixados", f"{conv_zw:.1f}%", f"{W} de {Z}")
+                    col_c1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Atraso → Aptos"}</div><div class="kpi-value">{f"{conv_xy:.1f}%"}</div><div class="kpi-delta">{f"{Y} de {X}"}</div></div>''', unsafe_allow_html=True)
+                    col_c2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Aptos → Agendados"}</div><div class="kpi-value">{f"{conv_yz:.1f}%"}</div><div class="kpi-delta">{f"{Z} de {Y}"}</div></div>''', unsafe_allow_html=True)
+                    col_c3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Agendados → Baixados"}</div><div class="kpi-value">{f"{conv_zw:.1f}%"}</div><div class="kpi-delta">{f"{W} de {Z}"}</div></div>''', unsafe_allow_html=True)
                     
                     # Evolução mês a mês (se houver mais de um mês capturado)
                     if len(meses_ord) > 1:
@@ -1976,6 +1968,7 @@ with aba_hist:
                                 }
                             )
                             fig_evol.update_layout(yaxis_title="Contratos", xaxis_title="Mês")
+                            fig_evol = aplicar_tema_moderno(fig_evol)
                             st.plotly_chart(fig_evol, use_container_width=True)
         except Exception as e:
             st.error(f"Erro ao processar o funil: {e}")
@@ -2012,14 +2005,12 @@ with aba_sem_cobertura:
             with st.container(border=True):
                 st.markdown("#### 📊 Resumo da Base Sem Cobertura")
                 col1, col2, col3, col4, col5, col6 = st.columns(6)
-                col1.metric("Total", f"{total_sc:,}".replace(",", "."), "Sem cobertura")
-                col2.metric("MP Em Dia", f"{em_dia_sc:,}".replace(",", "."))
-                col3.metric("Em Atraso", f"{atrasados_sc:,}".replace(",", "."), 
-                           f"{(atrasados_sc/total_sc*100):.1f}% do segmento", delta_color="inverse")
-                col4.metric("Atraso", f"{criticos_sc:,}".replace(",", "."), 
-                           "Sem capacidade definida", delta_color="off")
-                col5.metric("Adimplentes", f"{adim_sc:,}".replace(",", "."))
-                col6.metric("Inadimplentes", f"{inadim_sc:,}".replace(",", "."))
+                col1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Total"}</div><div class="kpi-value">{f"{total_sc:,}".replace(",", ".")}</div><div class="kpi-delta">{"Sem cobertura"}</div></div>''', unsafe_allow_html=True)
+                col2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"MP Em Dia"}</div><div class="kpi-value">{f"{em_dia_sc:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+                col3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Em Atraso"}</div><div class="kpi-value">{f"{atrasados_sc:,}".replace(",", ".")}</div><div class="kpi-delta">{f"{(atrasados_sc/total_sc*100):.1f}% do segmento" if total_sc > 0 else "0%"}</div></div>''', unsafe_allow_html=True)
+                col4.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Atraso"}</div><div class="kpi-value">{f"{criticos_sc:,}".replace(",", ".")}</div><div class="kpi-delta">{"Sem capacidade definida"}</div></div>''', unsafe_allow_html=True)
+                col5.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Adimplentes"}</div><div class="kpi-value">{f"{adim_sc:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+                col6.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Inadimplentes"}</div><div class="kpi-value">{f"{inadim_sc:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
             
             st.write("")
             
@@ -2291,11 +2282,9 @@ with aba_consulta:
             
             # Resumo da consulta
             col_r1, col_r2, col_r3 = st.columns(3)
-            col_r1.metric("Códigos buscados", len(codigos_buscados))
-            col_r2.metric("Encontrados", len(df_encontrados), delta_color="normal")
-            col_r3.metric("Não encontrados", len(nao_encontrados), 
-                         "Inativos ou não existem" if nao_encontrados else "Todos OK", 
-                         delta_color="inverse" if nao_encontrados else "normal")
+            col_r1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Códigos buscados"}</div><div class="kpi-value">{len(codigos_buscados)}</div></div>''', unsafe_allow_html=True)
+            col_r2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Encontrados"}</div><div class="kpi-value">{len(df_encontrados)}</div></div>''', unsafe_allow_html=True)
+            col_r3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Não encontrados"}</div><div class="kpi-value">{len(nao_encontrados)}</div><div class="kpi-delta">{"Inativos ou não existem" if nao_encontrados else "Todos OK"}</div></div>''', unsafe_allow_html=True)
             
             # Lista os não encontrados
             if nao_encontrados:
@@ -2398,7 +2387,7 @@ with aba_consulta:
     if df_isentos_val.empty:
         st.info("Nenhum contrato desconsiderado por desinstalação no momento.")
     else:
-        st.metric("Total desconsiderados", f"{len(df_isentos_val):,}".replace(",", "."))
+        st.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Total desconsiderados"}</div><div class="kpi-value">{f"{len(df_isentos_val):,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
         
         df_isentos_val['Vencimento MP'] = df_isentos_val['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
         cols_is = [
