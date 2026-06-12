@@ -274,7 +274,6 @@ def carregar_dados_completos():
         FOZ_Contrato_Anterior__c, FOZ_DataUltimaMP__c, FOZ_DataProximaMP__c, 
         FOZ_ValorTotal__c, AccountId, Account.Name, Account.FOZ_StatusPosicaoFinanceira__c, 
         Account.CNPJ__c, Account.FOZ_Classificacao__c,
-        Account.PersonMobilePhone,
         FOZ_EndFranquiaForm__c, FOZ_EnderecoEntrega__r.FOZ_CEP__c
     FROM Asset
     WHERE Status = 'Ativo-Em Operação'
@@ -284,25 +283,9 @@ def carregar_dados_completos():
     SELECT Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.CaseNumber, Case.Status, FOZ_Agendado_Data_Periodo__c, FOZ_Tipo_de_Servico__c
     FROM WorkOrder WHERE Case.Type = 'OS' AND Case.Status != 'Cancelado' AND Case.Status != 'Fechado' AND Status != 'Cancelado' AND Status != 'Fechado'
     """
-    # Queries enxutas: só os campos realmente usados no painel (telefones para o mailing).
-    # FirstName, LastName, Title, Email e LastModifiedDate foram removidos para reduzir
-    # o volume de dados trafegado e o footprint de memória.
-    query_contatos_completos = """
-    SELECT 
-        Account.CNPJ__c, Account.FOZ_CNPJ__c,
-        MobilePhone, Phone
-    FROM Contact 
-    WHERE (Account.CNPJ__c != null OR Account.FOZ_CNPJ__c != null)
-      AND (MobilePhone != null OR Phone != null)
-    """
-    query_acr_completos = """
-    SELECT 
-        Account.CNPJ__c, Account.FOZ_CNPJ__c,
-        Contact.MobilePhone, Contact.Phone
-    FROM AccountContactRelation
-    WHERE (Account.CNPJ__c != null OR Account.FOZ_CNPJ__c != null)
-      AND (Contact.MobilePhone != null OR Contact.Phone != null)
-    """
+    # LGPD: as queries de telefones (Contact / AccountContactRelation) foram REMOVIDAS
+    # do painel online. Dados pessoais de contato não trafegam para o Streamlit Cloud.
+    # O mailing completo com telefones é gerado LOCALMENTE via gerar_mailing_local.py.
     # OS de Manutenção Preventiva — usada para o Funil de Conversão Mensal.
     # A MP é um CASE (Type='OS', FOZ_TipoSolicitacao__c='MANUTENÇÃO PREVENTIVA').
     # Consultamos direto do Case porque o Asset está no campo customizado FOZ_Asset__c
@@ -323,19 +306,15 @@ def carregar_dados_completos():
     registros_ativos = sf.query_all(query_ativos).get('records', [])
     registros_contatos = sf.query_all(query_contatos).get('records', [])
     registros_os = sf.query_all(query_os).get('records', [])
-    registros_contatos_completos = sf.query_all(query_contatos_completos).get('records', [])
-    registros_acr_completos = sf.query_all(query_acr_completos).get('records', [])
     registros_os_mp = sf.query_all(query_os_mp).get('records', [])
     
     df_ativos = pd.json_normalize(registros_ativos)
     df_contatos = pd.json_normalize(registros_contatos)
-    df_contatos_completos = pd.json_normalize(registros_contatos_completos) if registros_contatos_completos else pd.DataFrame()
-    df_acr_completos = pd.json_normalize(registros_acr_completos) if registros_acr_completos else pd.DataFrame()
     
     # Libera as listas de dicts já que viraram DataFrames (cada lista de ~50k items
     # de dicts Python ocupa centenas de MB; o DataFrame equivalente ocupa muito menos).
     # Mantemos apenas registros_os, que ainda é iterado abaixo.
-    del registros_ativos, registros_contatos, registros_contatos_completos, registros_acr_completos
+    del registros_ativos, registros_contatos
     
     hoje = datetime.now(FUSO_BR)
     mes_atual = hoje.month
@@ -500,83 +479,8 @@ def carregar_dados_completos():
         if col in df.columns:
             df[col] = df[col].astype('category')
     
-    # ==========================================
-    # TELEFONES POR CNPJ (versão vetorizada — otimizada para memória)
-    # ==========================================
-    # Constrói uma tabela com (CNPJ_Limpo, Valor_telefone) extraída de 3 fontes:
-    #   1) Dados pessoais do Account (PersonMobilePhone do próprio Asset.Account)
-    #   2) Objeto Contact relacionado à Account
-    #   3) AccountContactRelation (contatos cross-account)
-    # Apenas telefones (e-mails não são utilizados pelo painel). Toda a montagem é
-    # vetorizada com pd.concat — evita iterrows() que cria milhões de dicts intermediários.
-    
-    frames_tel = []
-    
-    # FONTE 1: PersonMobilePhone do Account
-    if 'Account.PersonMobilePhone' in df.columns:
-        s1 = df[['Account.CNPJ__c', 'Account.PersonMobilePhone']].dropna()
-        s1 = s1[s1['Account.PersonMobilePhone'].astype(str).str.strip() != '']
-        s1 = s1.drop_duplicates(subset=['Account.CNPJ__c'])
-        if not s1.empty:
-            frames_tel.append(pd.DataFrame({
-                'CNPJ_Limpo': s1['Account.CNPJ__c'].values,
-                'Valor': s1['Account.PersonMobilePhone'].astype(str).str.strip().values,
-            }))
-    
-    # FONTE 2: Contact (campos MobilePhone e Phone)
-    if not df_contatos_completos.empty:
-        # Unifica o CNPJ vindo de Account.CNPJ__c OU Account.FOZ_CNPJ__c (vetorizado)
-        cnpj_a = df_contatos_completos.get('Account.CNPJ__c', pd.Series([None]*len(df_contatos_completos)))
-        cnpj_b = df_contatos_completos.get('Account.FOZ_CNPJ__c', pd.Series([None]*len(df_contatos_completos)))
-        cnpj_unif = cnpj_a.fillna(cnpj_b).astype(str).str.replace(r'\D', '', regex=True)
-        cnpj_unif = cnpj_unif.where(cnpj_unif.str.len() >= 11, None)  # CNPJ tem ≥11 dígitos
-        
-        for col in ['MobilePhone', 'Phone']:
-            if col in df_contatos_completos.columns:
-                tel = df_contatos_completos[col].astype(str).str.strip()
-                mask = (cnpj_unif.notna()) & (tel.notna()) & (tel != '') & (tel.str.lower() != 'nan')
-                if mask.any():
-                    frames_tel.append(pd.DataFrame({
-                        'CNPJ_Limpo': cnpj_unif[mask].values,
-                        'Valor': tel[mask].values,
-                    }))
-    
-    # FONTE 3: AccountContactRelation (mesma lógica, com colunas Contact.X)
-    if not df_acr_completos.empty:
-        cnpj_a = df_acr_completos.get('Account.CNPJ__c', pd.Series([None]*len(df_acr_completos)))
-        cnpj_b = df_acr_completos.get('Account.FOZ_CNPJ__c', pd.Series([None]*len(df_acr_completos)))
-        cnpj_unif = cnpj_a.fillna(cnpj_b).astype(str).str.replace(r'\D', '', regex=True)
-        cnpj_unif = cnpj_unif.where(cnpj_unif.str.len() >= 11, None)
-        
-        for col in ['Contact.MobilePhone', 'Contact.Phone']:
-            if col in df_acr_completos.columns:
-                tel = df_acr_completos[col].astype(str).str.strip()
-                mask = (cnpj_unif.notna()) & (tel.notna()) & (tel != '') & (tel.str.lower() != 'nan')
-                if mask.any():
-                    frames_tel.append(pd.DataFrame({
-                        'CNPJ_Limpo': cnpj_unif[mask].values,
-                        'Valor': tel[mask].values,
-                    }))
-    
-    # Libera os DataFrames de contatos auxiliares (já viraram telefones na tabela final)
-    del df_contatos_completos, df_acr_completos
-    
-    if frames_tel:
-        df_contatos_long = pd.concat(frames_tel, ignore_index=True)
-        # Deduplica pelo telefone normalizado (só dígitos) — mesmo número em formatos
-        # diferentes (com/sem máscara) é considerado o mesmo
-        df_contatos_long['_norm'] = df_contatos_long['Valor'].astype(str).str.replace(r'\D', '', regex=True)
-        df_contatos_long = df_contatos_long[df_contatos_long['_norm'].str.len() >= 8]
-        df_contatos_long = df_contatos_long.drop_duplicates(
-            subset=['CNPJ_Limpo', '_norm'], keep='first'
-        )
-        df_contatos_long = df_contatos_long.drop(columns=['_norm'])
-        # Coluna Tipo é redundante (só temos telefones), mas mantida por compatibilidade
-        # com o código da aba mailing que filtra por Tipo == 'Telefone'
-        df_contatos_long['Tipo'] = 'Telefone'
-        df_contatos_long = df_contatos_long.reset_index(drop=True)
-    else:
-        df_contatos_long = pd.DataFrame(columns=['CNPJ_Limpo', 'Valor', 'Tipo'])
+    # LGPD: a montagem da tabela de telefones foi removida do painel online.
+    # Telefones de clientes são tratados apenas no gerador local de mailing.
     
     # ==========================================
     # OS DE MP (para o Funil mensal)
@@ -613,7 +517,6 @@ def carregar_dados_completos():
     df.attrs['timestamp_carga'] = hoje.strftime('%d/%m/%Y %H:%M:%S')
     df.attrs['falhas_parse_data'] = falhas_parse_data
     df.attrs['total_registros'] = len(df)
-    df.attrs['contatos_long'] = df_contatos_long
     df.attrs['os_mp'] = df_os_mp
         
     return df
@@ -1402,51 +1305,21 @@ with aba_mailing:
             
                 df_mail_final['Data_Vencimento_MP'] = df_mail_final['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
                 
-                # ----------------------------------------------------------
-                # TELEFONES EM COLUNAS: cada contrato continua em UMA linha,
-                # mas ganha colunas adicionais "Telefone 01", "Telefone 02", ...
-                # com todos os telefones únicos disponíveis daquele CNPJ
-                # (vindos do Cadastro + Contact + AccountContactRelation).
-                # ----------------------------------------------------------
-                df_contatos_long = df_final.attrs.get('contatos_long', pd.DataFrame())
+                # LGPD: telefones de clientes NÃO são exibidos nem trafegam pelo painel online.
+                # O mailing completo com telefones é gerado localmente via gerar_mailing_local.py.
+                st.info(
+                    "🔒 **LGPD:** os telefones dos clientes não são exibidos no painel online. "
+                    "Para gerar o mailing completo com telefones, use o **gerador local** "
+                    "(`gerar_mailing_local.py`) na sua máquina."
+                )
                 
-                # Filtra apenas telefones, deduplica por CNPJ + valor (mesmo número em
-                # fontes diferentes não vira duplicidade) e numera sequencialmente
-                tel_por_cnpj = {}
-                if df_contatos_long is not None and not df_contatos_long.empty:
-                    df_tel = df_contatos_long[df_contatos_long['Tipo'] == 'Telefone'].copy()
-                    if not df_tel.empty:
-                        # Normaliza o telefone (só dígitos) para deduplicação, mas mantém o
-                        # valor original para exibição
-                        df_tel['_normalizado'] = df_tel['Valor'].astype(str).str.replace(r'\D', '', regex=True)
-                        df_tel = df_tel[df_tel['_normalizado'].str.len() >= 8]  # descarta lixo curto
-                        df_tel = df_tel.drop_duplicates(subset=['CNPJ_Limpo', '_normalizado'], keep='first')
-                        
-                        # Agrupa por CNPJ e empilha os telefones em lista
-                        for cnpj, grupo in df_tel.groupby('CNPJ_Limpo'):
-                            tel_por_cnpj[cnpj] = grupo['Valor'].tolist()
-                
-                # Quantas colunas de telefone serão criadas? (máximo entre todos os clientes do mailing)
-                max_tel = 0
-                for cnpj in df_mail_final['Account.CNPJ__c']:
-                    max_tel = max(max_tel, len(tel_por_cnpj.get(cnpj, [])))
-                
-                # Cria as colunas Telefone 01, Telefone 02, ... no DataFrame de exibição
-                df_mail_show = df_mail_final.copy()
-                for i in range(max_tel):
-                    col_nome = f"Telefone {i+1:02d}"
-                    df_mail_show[col_nome] = df_mail_show['Account.CNPJ__c'].apply(
-                        lambda c: tel_por_cnpj.get(c, [])[i] if i < len(tel_por_cnpj.get(c, [])) else ''
-                    )
-                
-                # Monta o DataFrame final na ordem de colunas que o usuário pediu
                 cols_finais = [
                     'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
                     'Status_Financeiro', 'Data_Vencimento_MP', 'Dias_Atraso',
                     'Prestador_CEP', 'Capacidade Disponível'
-                ] + [f"Telefone {i+1:02d}" for i in range(max_tel)]
+                ]
                 
-                df_exibicao_mail = df_mail_show[cols_finais].rename(columns={
+                df_exibicao_mail = df_mail_final[cols_finais].rename(columns={
                     'FOZ_CodigoItem__c': 'Cód. Item',
                     'Account.Name': 'Cliente',
                     'Account.CNPJ__c': 'CNPJ',
@@ -1458,19 +1331,10 @@ with aba_mailing:
                     'Capacidade Disponível': 'Vagas na Região'
                 }).sort_values(by=['Vagas na Região', 'Dias Atraso'], ascending=[False, False])
                 
-                # Estatísticas
-                qtd_sem_tel = (df_exibicao_mail[df_exibicao_mail.columns[df_exibicao_mail.columns.str.startswith('Telefone')].tolist()].eq('').all(axis=1).sum()
-                               if max_tel > 0 else len(df_exibicao_mail))
-                
-                st.caption(
-                    f"📋 **{len(df_exibicao_mail)} contratos** no mailing — até **{max_tel} telefone(s)** "
-                    f"por cliente. **{qtd_sem_tel}** contrato(s) sem nenhum telefone cadastrado."
-                )
-                
                 st.dataframe(df_exibicao_mail, use_container_width=True, hide_index=True)
             
                 st.download_button(
-                    label="📥 Baixar Mailing Pronto (Excel)",
+                    label="📥 Baixar Mailing (sem telefones)",
                     data=df_para_excel_bytes(df_exibicao_mail, 'Mailing_Agendamento'),
                     file_name=f"Mailing_Agendamento_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.ms-excel"
@@ -1584,23 +1448,13 @@ with aba_mailing:
                     st.markdown("**📋 Extrato detalhado**")
                     df_nao_acionados['Vencimento MP'] = df_nao_acionados['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
                     
-                    # Reaproveita a lógica de telefones do mailing principal
-                    max_tel_na = 0
-                    for cnpj in df_nao_acionados['Account.CNPJ__c']:
-                        max_tel_na = max(max_tel_na, len(tel_por_cnpj.get(cnpj, [])))
-                    
-                    for i in range(max_tel_na):
-                        col_nome = f"Telefone {i+1:02d}"
-                        df_nao_acionados[col_nome] = df_nao_acionados['Account.CNPJ__c'].apply(
-                            lambda c: tel_por_cnpj.get(c, [])[i] if i < len(tel_por_cnpj.get(c, [])) else ''
-                        )
-                    
+                    # LGPD: sem telefones no painel online (use o gerador local de mailing)
                     cols_na = [
                         'Motivo_Nao_Acionamento',
                         'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
                         'Status_Financeiro', 'Vencimento MP', 'Dias_Atraso',
                         'Prestador_CEP_Display', 'Capacidade Disponível'
-                    ] + [f"Telefone {i+1:02d}" for i in range(max_tel_na)]
+                    ]
                     
                     df_exibicao_na = df_nao_acionados[cols_na].rename(columns={
                         'Motivo_Nao_Acionamento': 'Motivo',
@@ -2423,14 +2277,17 @@ with aba_consulta:
         if not codigos_buscados:
             st.warning("Nenhum código válido foi identificado no texto inserido.")
         else:
-            # A comparação precisa ser robusta a tipos (alguns vêm como int, outros como str)
+            # A comparação precisa ser robusta a tipos E a zeros à esquerda
+            # (Salesforce usa '00017143', usuário pode digitar '17143')
             df_busca = df_final.copy()
             df_busca['_codigo_str'] = df_busca['FOZ_CodigoItem__c'].astype(str).str.strip()
+            df_busca['_codigo_norm'] = df_busca['_codigo_str'].str.lstrip('0')
+            codigos_norm = [c.lstrip('0') for c in codigos_buscados]
             
-            # Identifica encontrados e não encontrados
-            df_encontrados = df_busca[df_busca['_codigo_str'].isin(codigos_buscados)].copy()
-            encontrados_set = set(df_encontrados['_codigo_str'].tolist())
-            nao_encontrados = [c for c in codigos_buscados if c not in encontrados_set]
+            # Identifica encontrados e não encontrados (compara sem zeros à esquerda)
+            df_encontrados = df_busca[df_busca['_codigo_norm'].isin(codigos_norm)].copy()
+            encontrados_norm = set(df_encontrados['_codigo_norm'].tolist())
+            nao_encontrados = [codigos_buscados[i] for i, cn in enumerate(codigos_norm) if cn not in encontrados_norm]
             
             # Resumo da consulta
             col_r1, col_r2, col_r3 = st.columns(3)
@@ -2442,39 +2299,21 @@ with aba_consulta:
             
             # Lista os não encontrados
             if nao_encontrados:
-                with st.expander(f"⚠️ {len(nao_encontrados)} código(s) não encontrado(s) na base ativa"):
+                with st.expander(f"⚠️ {len(nao_encontrados)} código(s) não encontrado(s) na base"):
                     st.caption(
-                        "Estes códigos podem estar: (1) com Asset inativo no Salesforce; "
-                        "(2) digitados incorretamente; ou (3) não existem."
+                        "Estes códigos não vieram do Salesforce na carga atual. Possíveis motivos: "
+                        "(1) Asset com status diferente de 'Ativo-Em Operação' (ex.: Inativo, Desinstalado, Cancelado); "
+                        "(2) digitados incorretamente; ou (3) não existem. "
+                        "Obs.: contratos com OS de desinstalação aberta APARECEM aqui (como 'DESCONSIDERADO'), "
+                        "pois não são removidos da carga — apenas das análises de atraso."
                     )
                     st.code("\n".join(nao_encontrados))
             
             st.markdown("---")
             
             if not df_encontrados.empty:
-                # Cruza com a tabela de telefones (limite de 5 telefones por contrato)
-                df_contatos_long = df_final.attrs.get('contatos_long', pd.DataFrame())
-                tel_por_cnpj = {}
-                if df_contatos_long is not None and not df_contatos_long.empty:
-                    df_tel = df_contatos_long[df_contatos_long['Tipo'] == 'Telefone'].copy()
-                    df_tel['_normalizado'] = df_tel['Valor'].astype(str).str.replace(r'\D', '', regex=True)
-                    df_tel = df_tel[df_tel['_normalizado'].str.len() >= 8]
-                    df_tel = df_tel.drop_duplicates(subset=['CNPJ_Limpo', '_normalizado'], keep='first')
-                    for cnpj, grupo in df_tel.groupby('CNPJ_Limpo'):
-                        tel_por_cnpj[cnpj] = grupo['Valor'].tolist()
-                
-                # Define quantas colunas de telefone (até 5, para não poluir a tabela)
-                MAX_TEL_CONSULTA = 5
-                max_tel = 0
-                for cnpj in df_encontrados['Account.CNPJ__c']:
-                    max_tel = max(max_tel, min(len(tel_por_cnpj.get(cnpj, [])), MAX_TEL_CONSULTA))
-                
-                # Cria colunas de telefone
-                for i in range(max_tel):
-                    col_nome = f"Telefone {i+1:02d}"
-                    df_encontrados[col_nome] = df_encontrados['Account.CNPJ__c'].apply(
-                        lambda c: tel_por_cnpj.get(c, [])[i] if i < len(tel_por_cnpj.get(c, [])) else ''
-                    )
+                # LGPD: telefones não são exibidos no painel online
+                # (use o gerador local de mailing para obter contatos)
                 
                 # Formata datas para exibição
                 df_encontrados['Vencimento MP'] = df_encontrados['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
@@ -2495,7 +2334,7 @@ with aba_consulta:
                     'Vencimento MP', 'Última MP',
                     'Tem OS Aberta?', 'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento',
                     'SerialNumber'
-                ] + [f"Telefone {i+1:02d}" for i in range(max_tel)]
+                ]
                 
                 # Garante que todas as colunas existam (algumas podem não estar presentes em situações específicas)
                 cols_existentes = [c for c in cols_consulta if c in df_encontrados.columns]
@@ -2540,4 +2379,47 @@ with aba_consulta:
             "💡 **Dica:** o campo aceita códigos colados de uma coluna do Excel "
             "(uma linha por código), separados por vírgula, ou misturados. "
             "Códigos duplicados são consolidados automaticamente."
+        )
+    
+    # ============================================================
+    # EXTRATO DE CONTRATOS DESCONSIDERADOS (ISENTOS POR DESINSTALAÇÃO)
+    # ============================================================
+    # Permite validar quais contratos estão sendo escondidos da base de atraso por
+    # terem OS de desinstalação aberta. Útil para auditar os "contratos que sumiram".
+    st.markdown("---")
+    st.markdown("### 🚫 Contratos desconsiderados (OS de desinstalação aberta)")
+    st.caption(
+        "Contratos que TÊM atraso de MP mas foram retirados das análises por terem "
+        "OS de desinstalação aberta. Use este extrato para validar se o volume está correto."
+    )
+    
+    df_isentos_val = df_final[df_final['Atraso_Base'] == AtrasoBase.ISENTO].copy()
+    
+    if df_isentos_val.empty:
+        st.info("Nenhum contrato desconsiderado por desinstalação no momento.")
+    else:
+        st.metric("Total desconsiderados", f"{len(df_isentos_val):,}".replace(",", "."))
+        
+        df_isentos_val['Vencimento MP'] = df_isentos_val['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
+        cols_is = [
+            'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c',
+            'FOZ_EndFranquiaForm__c', 'Status_Financeiro', 'Vencimento MP',
+            'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento'
+        ]
+        cols_is_existentes = [c for c in cols_is if c in df_isentos_val.columns]
+        df_isentos_show = df_isentos_val[cols_is_existentes].rename(columns={
+            'FOZ_CodigoItem__c': 'Cód. Item', 'Account.Name': 'Cliente',
+            'Account.CNPJ__c': 'CNPJ', 'FOZ_EndFranquiaForm__c': 'Franquia',
+            'Status_Financeiro': 'Status Fin.', 'Numero_Caso': 'Nº OS',
+            'Tipo_Servico': 'Tipo de Serviço', 'Data_Agendamento': 'Data OS'
+        }).fillna({'Nº OS': '-', 'Tipo de Serviço': '-', 'Data OS': '-'})
+        
+        st.dataframe(df_isentos_show, use_container_width=True, hide_index=True, height=400)
+        
+        st.download_button(
+            label="📥 Baixar desconsiderados (Excel)",
+            data=df_para_excel_bytes(df_isentos_show, 'Desconsiderados'),
+            file_name=f"desconsiderados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.ms-excel",
+            key="dl_desconsiderados_val"
         )
