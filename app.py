@@ -364,18 +364,19 @@ def carregar_dados_completos():
     df.loc[mask_notnull, 'Meses_Diff'] = (hoje_limpo.year - df.loc[mask_notnull, 'Ano_MP']) * 12 + (hoje_limpo.month - df.loc[mask_notnull, 'Mes_MP'])
     
     # -----------------------------------------------------------------
-    # REGRA DE NEGÓCIO (alinhada com o time de BI):
-    # Um contrato só é considerado "ATRASADO" quando a próxima MP venceu há
-    # MAIS DE 1 MÊS COMPLETO (dia a dia), não apenas pela diferença de mês civil.
-    # Equivale ao SQL: FOZ_DataProximaMP__c < ADD_MONTHS(TODAY(), -1)
-    # 
-    # Exemplo: hoje = 14/05/2026, próxima MP = 20/04/2026
-    #   - Pela regra antiga (mês civil): 1 mês de diff → ATRASADO ❌
-    #   - Pela regra nova (mês completo): faltam 6 dias para completar 1 mês → EM DIA ✓
+    # REGRA DE NEGÓCIO:
+    # Um contrato é "ATRASADO" assim que a próxima MP passa da data de vencimento.
+    # NÃO há mais carência de 1 mês. Se venceu dia 15, no dia 16 já é vencido.
+    # No PRÓPRIO dia do vencimento (dia 15) o contrato ainda está EM DIA.
+    # Equivale ao SQL: FOZ_DataProximaMP__c < TODAY()
+    #
+    # Comparação feita por DATA pura (sem hora): normalizamos o vencimento para
+    # meia-noite e comparamos com a data de hoje (também à meia-noite). Sem isso,
+    # um contrato que vence hoje seria marcado como atrasado já no meio do dia.
     # -----------------------------------------------------------------
-    limite_carencia = hoje_limpo - pd.DateOffset(months=1)
+    hoje_data_ts = pd.Timestamp(hoje.date())  # hoje à meia-noite, no fuso de SP
     df['Atraso_Base'] = np.where(
-        df['FOZ_DataProximaMP__c'] < limite_carencia,
+        df['FOZ_DataProximaMP__c'].dt.normalize() < hoje_data_ts,
         AtrasoBase.ATRASADO,
         AtrasoBase.EM_DIA
     )
@@ -394,7 +395,7 @@ def carregar_dados_completos():
     valores_status = [StatusMP.EM_DIA, StatusMP.DESCONSIDERADO, StatusMP.PROGRAMADO]
     df['Status_MP_Real'] = np.select(cond_status, valores_status, default=StatusMP.CRITICO)
     
-    df['Dias_Atraso'] = (hoje_limpo - df['FOZ_DataProximaMP__c']).dt.days
+    df['Dias_Atraso'] = (hoje_data_ts - df['FOZ_DataProximaMP__c'].dt.normalize()).dt.days
     
     # ----- Vetorização de classificar_aging (substitui df.apply linha-a-linha) -----
     # Mesmas faixas: 0-30 / 30-60 / 60-90 / 90-120 / 120-150 / 150+ / EM DIA
@@ -1478,8 +1479,7 @@ with aba_m0:
     st.markdown("### 🎯 M0 — Contratos com MP vencendo no próximo mês")
     st.markdown(
         "Lista todos os contratos da base ativa cuja **próxima MP vence no próximo mês civil** "
-        "em relação à data de hoje. **Visão crua**, sem a regra de 'atraso = vencimento + 1 mês' "
-        "aplicada nas outras abas. Use essa aba para se antecipar e atuar antes que esses contratos "
+        "em relação à data de hoje. Use essa aba para se antecipar e atuar antes que esses contratos "
         "entrem em atraso."
     )
     
@@ -1847,7 +1847,7 @@ with aba_hist:
                             <table style='width:100%; font-size:12px; color:#334155; border-collapse:collapse;'>
                                 <tr>
                                     <td style='padding:4px 8px; vertical-align:top; width:40px;'><span style='display:inline-block; width:14px; height:14px; background-color:#1f77b4; border-radius:3px;'></span></td>
-                                    <td style='padding:4px 8px;'><b>Iniciaram o mês em atraso</b> — contratos cuja manutenção preventiva já estava vencida há mais de 1 mês na foto do dia 01.</td>
+                                    <td style='padding:4px 8px;'><b>Iniciaram o mês em atraso</b> — contratos cuja manutenção preventiva já estava vencida (passou da data de vencimento) na foto do dia 01.</td>
                                 </tr>
                                 <tr>
                                     <td style='padding:4px 8px; vertical-align:top;'><span style='display:inline-block; width:14px; height:14px; background-color:#17a2b8; border-radius:3px;'></span></td>
