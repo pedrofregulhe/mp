@@ -241,6 +241,17 @@ def exibir_extrato_resumido(df_alvo, key_download=None):
             key=f"dl_{key_download}"
         )
 
+def selecionar_woli(wolis):
+    """Regra da OS (mesma do casosporitem): ignora WOLIs Canceladas/Reagendadas e
+    retorna a valida mais recente (a subquery ja vem ORDER BY CreatedDate DESC).
+    Fallback: a mais recente de qualquer status. Retorna None se nao houver WOLI."""
+    if not wolis:
+        return None
+    status_ignorados = ('Cancelado', 'Reagendado')
+    validas = [w for w in wolis if w.get('Status') not in status_ignorados]
+    return validas[0] if validas else wolis[0]
+
+
 # ==========================================
 # 3. CONEXÃO E PROCESSAMENTO
 # ==========================================
@@ -267,7 +278,9 @@ def carregar_dados_completos():
     """
     query_contatos = "SELECT AccountId, Account.FOZ_CNPJ__c FROM Contact WHERE Account.FOZ_CNPJ__c != null"
     query_os = """
-    SELECT Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.CaseNumber, Case.Status, FOZ_Agendado_Data_Periodo__c, FOZ_Tipo_de_Servico__c
+    SELECT Case.FOZ_Asset__r.FOZ_CodigoItem__c, Case.CaseNumber, Case.Status,
+           Case.FOZ_TipoSolicitacao__c, FOZ_Agendado_Data_Periodo__c, FOZ_Tipo_de_Servico__c,
+           (SELECT LineItemNumber, toLabel(Status) FROM WorkOrderLineItems ORDER BY CreatedDate DESC LIMIT 200)
     FROM WorkOrder WHERE Case.Type = 'OS' AND Case.Status != 'Cancelado' AND Case.Status != 'Fechado' AND Status != 'Cancelado' AND Status != 'Fechado'
     """
     # LGPD: as queries de telefones (Contact / AccountContactRelation) foram REMOVIDAS
@@ -316,8 +329,9 @@ def carregar_dados_completos():
         caso = reg.get('Case') or {}; asset = caso.get('FOZ_Asset__r') or {}
         data_agendamento_raw = reg.get('FOZ_Agendado_Data_Periodo__c')
         tipo_servico = reg.get('FOZ_Tipo_de_Servico__c')
-        agendado_mes_atual = False; agendado_hoje = False; tem_data = 1 if data_agendamento_raw else 0 
-        
+        agendado_mes_atual = False; agendado_hoje = False; tem_data = 1 if data_agendamento_raw else 0
+        data_obj = None
+
         if data_agendamento_raw:
             try:
                 data_limpa = str(data_agendamento_raw).split(' -')[0].strip()
@@ -326,15 +340,45 @@ def carregar_dados_completos():
                 if data_obj == hoje_data: agendado_hoje = True
             except Exception:
                 falhas_parse_data += 1
+                data_obj = None
+
+        # Regra de WOLI aplicada a OS: status do item de servico valido mais recente
+        woli_sel = selecionar_woli((reg.get('WorkOrderLineItems') or {}).get('records'))
+        status_item_servico = woli_sel.get('Status') if woli_sel else None
+        mes_ag = data_obj.month if data_obj else None
+        ano_ag = data_obj.year if data_obj else None
 
         lista_os.append({
             'CodigoItem': asset.get('FOZ_CodigoItem__c'), 'Tem_OS_Aberta': True,
             'Agendado_Mes_Atual': agendado_mes_atual, 'Agendado_Hoje': agendado_hoje,
             'Tem_Data': tem_data, 'Numero_Caso': caso.get('CaseNumber'),
-            'Tipo_Servico': tipo_servico, 'Data_Agendamento_Raw': data_agendamento_raw
+            'Tipo_Servico': tipo_servico, 'Data_Agendamento_Raw': data_agendamento_raw,
+            'Tipo_Solicitacao': caso.get('FOZ_TipoSolicitacao__c'),
+            'Status_Item_Servico': status_item_servico,
+            'Data_Agendamento_Obj': data_obj,
+            'Mes_Agendamento': mes_ag, 'Ano_Agendamento': ano_ag
         })
     
     df_os = pd.DataFrame(lista_os)
+
+    # OS de MP com data agendada (alimenta a aba 'MP Agendado' — quebra por mês da visita).
+    # Construído a partir da lista COMPLETA (antes do dedup por item).
+    if not df_os.empty and 'Tipo_Solicitacao' in df_os.columns:
+        df_os_mp_agendado = df_os[
+            (df_os['Tipo_Solicitacao'] == 'MANUTENÇÃO PREVENTIVA') &
+            (df_os['Data_Agendamento_Obj'].notna())
+        ].copy()
+    else:
+        df_os_mp_agendado = pd.DataFrame()
+    if not df_os_mp_agendado.empty:
+        _dt_ag = pd.to_datetime(df_os_mp_agendado['Data_Agendamento_Obj'], errors='coerce')
+        df_os_mp_agendado['Data_Agendamento'] = _dt_ag.dt.strftime('%d/%m/%Y')
+        df_os_mp_agendado['Mes_Agendamento'] = _dt_ag.dt.month
+        df_os_mp_agendado['Ano_Agendamento'] = _dt_ag.dt.year
+        df_os_mp_agendado = df_os_mp_agendado[[
+            'CodigoItem', 'Numero_Caso', 'Tipo_Servico', 'Status_Item_Servico',
+            'Data_Agendamento', 'Mes_Agendamento', 'Ano_Agendamento'
+        ]]
     del lista_os, registros_os  # libera memória das listas iteradas
     if not df_os.empty:
         df_os = df_os.sort_values(by=['Agendado_Mes_Atual', 'Tem_Data'], ascending=[False, False]).drop_duplicates(subset=['CodigoItem'])
@@ -506,6 +550,7 @@ def carregar_dados_completos():
     df.attrs['falhas_parse_data'] = falhas_parse_data
     df.attrs['total_registros'] = len(df)
     df.attrs['os_mp'] = df_os_mp
+    df.attrs['os_mp_agendado'] = df_os_mp_agendado
         
     return df
 
@@ -866,13 +911,14 @@ if erro_arquivos_estaveis and not prestador_mapeado:
 # ==========================================
 # 8. RENDERIZAÇÃO DAS ABAS
 # ==========================================
-aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_hist, aba_sem_cobertura, aba_consulta = st.tabs([
+aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_mp_agendado, aba_hist, aba_sem_cobertura, aba_consulta = st.tabs([
     "Visão Executiva", 
     "Visão por Franquias", 
     "Atraso vs Capacidade",
     "Capacidade Diária",
     "Mailing Acionável",
     "M0",
+    "MP Agendado",
     "Funil Mensal",
     "Sem Cobertura de CEP",
     "Consulta de Asset"
@@ -1596,6 +1642,99 @@ with aba_m0:
             )
         else:
             st.info("Nenhum contrato encontrado com os filtros aplicados.")
+
+# === ABA: MP AGENDADO (quebra por mês da data agendada) ===
+with aba_mp_agendado:
+    st.markdown("### 📆 MP Agendado — quebra por mês")
+    st.markdown(
+        "Todas as **OS de Manutenção Preventiva com data agendada** (data da visita), "
+        "agrupadas pelo **mês do agendamento**. A escolha do item de serviço usa a regra de WOLI "
+        "(ignora Cancelado/Reagendado e pega o válido mais recente). "
+        "Reflete a carteira ativa e respeita o filtro global de Classificação."
+    )
+
+    _meses_abrev = {
+        1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+        7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'
+    }
+
+    df_ag = df_final.attrs.get('os_mp_agendado')
+    if df_ag is None or df_ag.empty:
+        st.info("Nenhuma OS de Manutenção Preventiva com data agendada encontrada.")
+    else:
+        df_ag = df_ag.copy()
+        df_ag['CodigoItem'] = df_ag['CodigoItem'].astype(str)
+
+        # Restringe à carteira ativa/filtrada (inner join => respeita o filtro de Classificação)
+        _ctx_cols = ['FOZ_CodigoItem__c', 'Account.Name', 'FOZ_EndFranquiaForm__c', 'Status_Financeiro']
+        _ctx = df_final[[c for c in _ctx_cols if c in df_final.columns]].copy()
+        _ctx['FOZ_CodigoItem__c'] = _ctx['FOZ_CodigoItem__c'].astype(str)
+        df_ag = df_ag.merge(_ctx, left_on='CodigoItem', right_on='FOZ_CodigoItem__c', how='inner')
+
+        if df_ag.empty:
+            st.info("Nenhuma OS de MP agendada na carteira ativa atual (verifique o filtro de Classificação).")
+        else:
+            _hoje = datetime.now(FUSO_BR)
+            _mes_c, _ano_c = _hoje.month, _hoje.year
+
+            total_agendado = len(df_ag)
+            no_mes = int(((df_ag['Mes_Agendamento'] == _mes_c) & (df_ag['Ano_Agendamento'] == _ano_c)).sum())
+            clientes_unicos = df_ag['Account.Name'].nunique() if 'Account.Name' in df_ag.columns else df_ag['CodigoItem'].nunique()
+
+            with st.container(border=True):
+                st.markdown("#### 📊 Resumo")
+                k1, k2, k3 = st.columns(3)
+                k1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Total agendado (carteira ativa)"}</div><div class="kpi-value">{f"{total_agendado:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+                k2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{f"Agendado neste mês ({_meses_abrev[_mes_c]}/{_ano_c})"}</div><div class="kpi-value">{f"{no_mes:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+                k3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Clientes únicos"}</div><div class="kpi-value">{f"{clientes_unicos:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+
+            st.write("")
+
+            # Quebra por mês — todos os meses presentes, em ordem cronológica
+            df_ag['_MesKey'] = df_ag['Ano_Agendamento'].astype(int) * 100 + df_ag['Mes_Agendamento'].astype(int)
+            df_ag['Mês'] = df_ag['Mes_Agendamento'].astype(int).map(_meses_abrev) + '/' + df_ag['Ano_Agendamento'].astype(int).astype(str)
+
+            resumo_mes = (
+                df_ag.groupby(['_MesKey', 'Mês']).size()
+                .reset_index(name='OS agendadas')
+                .sort_values('_MesKey')
+            )
+
+            fig_ag = px.bar(resumo_mes, x='Mês', y='OS agendadas', text='OS agendadas')
+            fig_ag.update_traces(textposition='outside')
+            fig_ag.update_xaxes(categoryorder='array', categoryarray=resumo_mes['Mês'].tolist())
+            fig_ag = aplicar_tema_moderno(fig_ag)
+            st.plotly_chart(fig_ag, use_container_width=True)
+
+            col_resumo, col_detalhe = st.columns([1, 2])
+            with col_resumo:
+                st.markdown("##### Por mês")
+                st.dataframe(resumo_mes[['Mês', 'OS agendadas']], use_container_width=True, hide_index=True)
+
+            with col_detalhe:
+                st.markdown("##### Detalhe das OS")
+                _meses_opts = ['Todos os meses'] + resumo_mes['Mês'].tolist()
+                filtro_mes_ag = st.selectbox("Filtrar por mês:", _meses_opts, key="filtro_mp_ag_mes")
+                df_det = df_ag if filtro_mes_ag == 'Todos os meses' else df_ag[df_ag['Mês'] == filtro_mes_ag]
+
+                _cols_det = ['CodigoItem', 'Account.Name', 'FOZ_EndFranquiaForm__c', 'Status_Financeiro',
+                             'Numero_Caso', 'Tipo_Servico', 'Status_Item_Servico', 'Data_Agendamento', 'Mês']
+                df_det_show = df_det[[c for c in _cols_det if c in df_det.columns]].rename(columns={
+                    'CodigoItem': 'Cód. Item', 'Account.Name': 'Cliente',
+                    'FOZ_EndFranquiaForm__c': 'Franquia', 'Status_Financeiro': 'Status Fin.',
+                    'Numero_Caso': 'Nº OS', 'Tipo_Servico': 'Tipo de Serviço',
+                    'Status_Item_Servico': 'Status do Item', 'Data_Agendamento': 'Data Agendada'
+                }).fillna('—')
+                st.caption(f"Exibindo **{len(df_det_show):,} OS**.".replace(",", "."))
+                st.dataframe(df_det_show, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                label="📥 Baixar MP agendado (Excel)",
+                data=df_para_excel_bytes(df_det_show, 'MP_Agendado'),
+                file_name=f"mp_agendado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.ms-excel",
+                key="dl_mp_agendado"
+            )
 
 # === ABA 6: HISTÓRICO (SNAPSHOT) ===
 with aba_hist:
