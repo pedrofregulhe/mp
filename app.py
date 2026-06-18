@@ -30,6 +30,7 @@ class StatusFin:
 
 ARQUIVO_FUNIL = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'historico_funil.csv')
 FUSO_BR = pytz.timezone('America/Sao_Paulo')
+CARENCIA_ATRASO_DIAS = 30  # dias de carencia: o contrato so entra em ATRASO N dias apos o vencimento da MP
 
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA E CSS
@@ -410,17 +411,20 @@ def carregar_dados_completos():
     # -----------------------------------------------------------------
     # REGRA DE NEGÓCIO:
     # Um contrato é "ATRASADO" assim que a próxima MP passa da data de vencimento.
-    # NÃO há mais carência de 1 mês. Se venceu dia 15, no dia 16 já é vencido.
+    # Carência de 30 dias após o vencimento (regra restaurada): venceu dia 15, fica EM DIA até o dia 15 do mês seguinte.
     # No PRÓPRIO dia do vencimento (dia 15) o contrato ainda está EM DIA.
-    # Equivale ao SQL: FOZ_DataProximaMP__c < TODAY()
+    # Equivale ao SQL: (FOZ_DataProximaMP__c + 30 dias) < TODAY()
     #
     # Comparação feita por DATA pura (sem hora): normalizamos o vencimento para
     # meia-noite e comparamos com a data de hoje (também à meia-noite). Sem isso,
     # um contrato que vence hoje seria marcado como atrasado já no meio do dia.
     # -----------------------------------------------------------------
     hoje_data_ts = pd.Timestamp(hoje.date())  # hoje à meia-noite, no fuso de SP
+    # Carencia de 30 dias restaurada: o contrato so fica ATRASADO 30 dias APOS o
+    # vencimento. Ex.: venceu 15/06 -> em 15/07 ainda EM DIA -> em 16/07 ATRASADO.
+    _prazo_atraso = df['FOZ_DataProximaMP__c'].dt.normalize() + pd.Timedelta(days=CARENCIA_ATRASO_DIAS)
     df['Atraso_Base'] = np.where(
-        df['FOZ_DataProximaMP__c'].dt.normalize() < hoje_data_ts,
+        _prazo_atraso < hoje_data_ts,
         AtrasoBase.ATRASADO,
         AtrasoBase.EM_DIA
     )
@@ -1522,11 +1526,11 @@ with aba_mailing:
 
 # === ABA 6: M0 (CONTRATOS COM MP VENCENDO NO MÊS+1) ===
 with aba_m0:
-    st.markdown("### 🎯 M0 — Contratos com MP vencendo no próximo mês")
+    st.markdown("### 🎯 M0 — Contratos que entram em atraso no próximo mês")
     st.markdown(
-        "Lista todos os contratos da base ativa cuja **próxima MP vence no próximo mês civil** "
-        "em relação à data de hoje. Use essa aba para se antecipar e atuar antes que esses contratos "
-        "entrem em atraso."
+        "Lista os contratos da base ativa que **entram em atraso no próximo mês civil** "
+        "(vencimento da MP + 30 dias de carência) em relação à data de hoje. Use essa aba para "
+        "se antecipar e atuar antes que esses contratos entrem em atraso."
     )
     
     # Calcula o mês-alvo: mês corrente + 1
@@ -1548,12 +1552,15 @@ with aba_m0:
     
     st.caption(f"📅 Mês de referência: **{nome_mes_alvo}** (hoje é {hoje_br.strftime('%d/%m/%Y')})")
     
-    # Filtra contratos da base ativa cujo FOZ_DataProximaMP__c cai no mês-alvo.
-    # IMPORTANTE: aqui usamos a base completa (df_final) e NÃO df_ativos_reais,
-    # porque queremos a visão crua, incluindo contratos com OS de desinstalação se houver.
+    # A "entrada em atraso" acontece CARENCIA_ATRASO_DIAS dias após o vencimento (mesma regra do
+    # Atraso_Base). Por isso o M0 olha o mês em que o contrato ENTRA EM ATRASO (vencimento + carência),
+    # e não o mês do vencimento cru. Ex.: venceu 15/06 -> entra em atraso 16/07 -> cai no M0 de julho.
+    # IMPORTANTE: usamos a base completa (df_final), não df_ativos_reais, para a visão crua
+    # (inclui contratos com OS de desinstalação, se houver).
+    _entrada_atraso_m0 = df_final['FOZ_DataProximaMP__c'] + pd.Timedelta(days=CARENCIA_ATRASO_DIAS)
     df_m0 = df_final[
-        (df_final['FOZ_DataProximaMP__c'].dt.month == mes_alvo) &
-        (df_final['FOZ_DataProximaMP__c'].dt.year == ano_alvo)
+        (_entrada_atraso_m0.dt.month == mes_alvo) &
+        (_entrada_atraso_m0.dt.year == ano_alvo)
     ].copy()
     
     if df_m0.empty:
@@ -1674,44 +1681,55 @@ with aba_mp_agendado:
         if df_ag.empty:
             st.info("Nenhuma OS de MP agendada na carteira ativa atual (verifique o filtro de Classificação).")
         else:
-            _hoje = datetime.now(FUSO_BR)
-            _mes_c, _ano_c = _hoje.month, _hoje.year
-
-            total_agendado = len(df_ag)
-            no_mes = int(((df_ag['Mes_Agendamento'] == _mes_c) & (df_ag['Ano_Agendamento'] == _ano_c)).sum())
-            clientes_unicos = df_ag['Account.Name'].nunique() if 'Account.Name' in df_ag.columns else df_ag['CodigoItem'].nunique()
-
-            with st.container(border=True):
-                st.markdown("#### 📊 Resumo")
-                k1, k2, k3 = st.columns(3)
-                k1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Total agendado (carteira ativa)"}</div><div class="kpi-value">{f"{total_agendado:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
-                k2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{f"Agendado neste mês ({_meses_abrev[_mes_c]}/{_ano_c})"}</div><div class="kpi-value">{f"{no_mes:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
-                k3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Clientes únicos"}</div><div class="kpi-value">{f"{clientes_unicos:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
-
-            st.write("")
-
-            # Quebra por mês — todos os meses presentes, em ordem cronológica
-            df_ag['_MesKey'] = df_ag['Ano_Agendamento'].astype(int) * 100 + df_ag['Mes_Agendamento'].astype(int)
-            df_ag['Mês'] = df_ag['Mes_Agendamento'].astype(int).map(_meses_abrev) + '/' + df_ag['Ano_Agendamento'].astype(int).astype(str)
-
-            resumo_mes = (
-                df_ag.groupby(['_MesKey', 'Mês']).size()
-                .reset_index(name='OS agendadas')
-                .sort_values('_MesKey')
+            # --- Filtro de Status do Item (WOLI) no TOPO da aba: afeta KPIs, gráfico e tabela ---
+            _status_opts = sorted([s for s in df_ag['Status_Item_Servico'].dropna().unique()])
+            status_sel = st.multiselect(
+                "Status do Item (WOLI):",
+                options=_status_opts,
+                default=[],
+                placeholder="Todos",
+                key="filtro_mp_ag_status",
+                help="Filtra os indicadores, o gráfico e a tabela por um ou mais status do item de serviço. Vazio = todos."
             )
+            if status_sel:
+                df_ag = df_ag[df_ag['Status_Item_Servico'].isin(status_sel)].copy()
 
-            fig_ag = px.bar(resumo_mes, x='Mês', y='OS agendadas', text='OS agendadas')
-            fig_ag.update_traces(textposition='outside')
-            fig_ag.update_xaxes(categoryorder='array', categoryarray=resumo_mes['Mês'].tolist())
-            fig_ag = aplicar_tema_moderno(fig_ag)
-            st.plotly_chart(fig_ag, use_container_width=True)
+            if df_ag.empty:
+                st.info("Nenhuma OS de MP agendada com o(s) status selecionado(s).")
+            else:
+                _hoje = datetime.now(FUSO_BR)
+                _mes_c, _ano_c = _hoje.month, _hoje.year
 
-            col_resumo, col_detalhe = st.columns([1, 2])
-            with col_resumo:
-                st.markdown("##### Por mês")
-                st.dataframe(resumo_mes[['Mês', 'OS agendadas']], use_container_width=True, hide_index=True)
+                total_agendado = len(df_ag)
+                no_mes = int(((df_ag['Mes_Agendamento'] == _mes_c) & (df_ag['Ano_Agendamento'] == _ano_c)).sum())
+                clientes_unicos = df_ag['Account.Name'].nunique() if 'Account.Name' in df_ag.columns else df_ag['CodigoItem'].nunique()
 
-            with col_detalhe:
+                with st.container(border=True):
+                    st.markdown("#### 📊 Resumo")
+                    k1, k2, k3 = st.columns(3)
+                    k1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Total agendado (carteira ativa)"}</div><div class="kpi-value">{f"{total_agendado:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+                    k2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{f"Agendado neste mês ({_meses_abrev[_mes_c]}/{_ano_c})"}</div><div class="kpi-value">{f"{no_mes:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+                    k3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Clientes únicos"}</div><div class="kpi-value">{f"{clientes_unicos:,}".replace(",", ".")}</div></div>''', unsafe_allow_html=True)
+
+                st.write("")
+
+                # Quebra por mês — todos os meses presentes, em ordem cronológica
+                df_ag['_MesKey'] = df_ag['Ano_Agendamento'].astype(int) * 100 + df_ag['Mes_Agendamento'].astype(int)
+                df_ag['Mês'] = df_ag['Mes_Agendamento'].astype(int).map(_meses_abrev) + '/' + df_ag['Ano_Agendamento'].astype(int).astype(str)
+
+                resumo_mes = (
+                    df_ag.groupby(['_MesKey', 'Mês']).size()
+                    .reset_index(name='OS agendadas')
+                    .sort_values('_MesKey')
+                )
+
+                fig_ag = px.bar(resumo_mes, x='Mês', y='OS agendadas', text='OS agendadas')
+                fig_ag.update_traces(textposition='outside')
+                fig_ag.update_xaxes(categoryorder='array', categoryarray=resumo_mes['Mês'].tolist())
+                fig_ag = aplicar_tema_moderno(fig_ag)
+                st.plotly_chart(fig_ag, use_container_width=True)
+
+                # Detalhe das OS (tabela em largura total — sem a tabela "Por mês")
                 st.markdown("##### Detalhe das OS")
                 _meses_opts = ['Todos os meses'] + resumo_mes['Mês'].tolist()
                 filtro_mes_ag = st.selectbox("Filtrar por mês:", _meses_opts, key="filtro_mp_ag_mes")
@@ -1728,13 +1746,13 @@ with aba_mp_agendado:
                 st.caption(f"Exibindo **{len(df_det_show):,} OS**.".replace(",", "."))
                 st.dataframe(df_det_show, use_container_width=True, hide_index=True)
 
-            st.download_button(
-                label="📥 Baixar MP agendado (Excel)",
-                data=df_para_excel_bytes(df_det_show, 'MP_Agendado'),
-                file_name=f"mp_agendado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.ms-excel",
-                key="dl_mp_agendado"
-            )
+                st.download_button(
+                    label="📥 Baixar MP agendado (Excel)",
+                    data=df_para_excel_bytes(df_det_show, 'MP_Agendado'),
+                    file_name=f"mp_agendado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.ms-excel",
+                    key="dl_mp_agendado"
+                )
 
 # === ABA 6: HISTÓRICO (SNAPSHOT) ===
 with aba_hist:
