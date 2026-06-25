@@ -1673,7 +1673,7 @@ with aba_mp_por_mes:
 - **O que cada linha mostra:** para o mês daquele "M", o total de contratos com MP vencendo e a quebra
   por situação financeira (Adimplentes / Inadimplentes) e por OS (com/sem OS aberta).
 - **Fora do recorte futuro:** contratos com vencimento **no mês atual ou já vencidos** não entram nas
-  colunas M1+ — eles aparecem apenas no indicador "Mês atual / já vencido" no resumo do topo.
+  colunas M1+ — eles ficam de fora desta visão, que olha apenas os meses à frente.
             """
         )
 
@@ -1734,22 +1734,6 @@ with aba_mp_por_mes:
         })
 
     df_resumo_mpm = pd.DataFrame(linhas_resumo)
-
-    # Contratos além do horizonte exibido (M{n+1} em diante)
-    total_alem = int((df_mpm['_offset_meses'] > horizonte_meses).sum())
-    # Contratos com MP vencendo neste mês ou já vencida (offset <= 0) — fora do escopo "pra frente"
-    total_passado_ou_atual = int((df_mpm['_offset_meses'] <= 0).sum())
-
-    # KPIs de topo
-    total_no_horizonte = int(df_resumo_mpm['Contratos'].sum())
-    with st.container(border=True):
-        st.markdown("#### 📊 Resumo da janela exibida")
-        c1, c2, c3 = st.columns(3)
-        c1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Contratos em M1..M" + str(horizonte_meses)}</div><div class="kpi-value">{f"{total_no_horizonte:,}".replace(",", ".")}</div><div class="kpi-delta">{"Na janela exibida"}</div></div>''', unsafe_allow_html=True)
-        c2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Além de M" + str(horizonte_meses)}</div><div class="kpi-value">{f"{total_alem:,}".replace(",", ".")}</div><div class="kpi-delta">{"Vencem mais à frente"}</div></div>''', unsafe_allow_html=True)
-        c3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Mês atual / já vencido"}</div><div class="kpi-value">{f"{total_passado_ou_atual:,}".replace(",", ".")}</div><div class="kpi-delta">{"Fora do recorte futuro"}</div></div>''', unsafe_allow_html=True)
-
-    st.write("")
 
     # Tabela-resumo (formata milhares com ponto para exibição)
     df_resumo_show = df_resumo_mpm.copy()
