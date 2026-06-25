@@ -1652,13 +1652,32 @@ with aba_m0:
 with aba_mp_por_mes:
     st.markdown("### 🗓️ Quebra de MP por Mês (M1, M2, M3...)")
     st.markdown(
-        "Distribui a base ativa pelos próximos meses, mostrando **quantos contratos entram em atraso** "
-        "em cada mês à frente. Segue a **mesma regra do M0**: o mês considerado é o mês em que o contrato "
-        "**entra em atraso** (vencimento da MP + 30 dias de carência), e não o mês cru do vencimento. "
-        "**M1** = um mês à frente do mês corrente, **M2** = dois meses à frente, e assim por diante."
+        "Distribui a base ativa pelos próximos meses, mostrando **quantos contratos têm a MP vencendo** "
+        "em cada mês à frente. **M1** = um mês à frente do mês corrente, **M2** = dois meses à frente, "
+        "e assim por diante."
     )
 
-    # Base de referência temporal (mesma lógica do M0)
+    # Texto explicativo: como esta aba consolida as informações
+    with st.container(border=True):
+        st.markdown(
+            """
+**ℹ️ Como esta aba consolida as informações**
+
+- **Critério de mês:** diferente da aba **M0**, aqui o contrato é alocado pelo **mês da própria data de
+  vencimento da MP** (`FOZ_DataProximaMP__c`), **sem** aplicar os 30 dias de carência. Ou seja, se a MP
+  vence em qualquer dia de um mês, o contrato é contado naquele mês — independentemente do dia.
+- **Como os "M" são contados:** o mês corrente é o ponto de partida. **M1** é o próximo mês civil, **M2**
+  o seguinte, e assim por diante (a virada de ano é tratada automaticamente).
+- **Base utilizada:** a base completa de contratos da carga atual (mesma origem do M0), incluindo
+  eventuais contratos com OS de desinstalação aberta, para dar a visão crua do volume.
+- **O que cada linha mostra:** para o mês daquele "M", o total de contratos com MP vencendo e a quebra
+  por situação financeira (Adimplentes / Inadimplentes) e por OS (com/sem OS aberta).
+- **Fora do recorte futuro:** contratos com vencimento **no mês atual ou já vencidos** não entram nas
+  colunas M1+ — eles aparecem apenas no indicador "Mês atual / já vencido" no resumo do topo.
+            """
+        )
+
+    # Base de referência temporal
     hoje_mpm = datetime.now(FUSO_BR)
     mes_corrente_mpm = hoje_mpm.month
     ano_corrente_mpm = hoje_mpm.year
@@ -1676,13 +1695,14 @@ with aba_mp_por_mes:
         min_value=3, max_value=18, value=12, step=1, key="mpm_horizonte"
     )
 
-    # Entrada em atraso = vencimento da MP + carência (mesma regra do Atraso_Base e do M0).
-    # Usa a base completa (df_final) para a visão crua, igual ao M0.
-    _entrada_atraso_mpm = df_final['FOZ_DataProximaMP__c'] + pd.Timedelta(days=CARENCIA_ATRASO_DIAS)
+    # IMPORTANTE: nesta aba (e SOMENTE nesta aba) NÃO se aplica a carência de 30 dias.
+    # O contrato é alocado pelo mês da própria data de vencimento da MP.
+    # Usa a base completa (df_final) para a visão crua.
+    _venc_mpm = df_final['FOZ_DataProximaMP__c']
 
     # Índice de mês absoluto (ano*12 + mês) para calcular a diferença em meses de forma robusta
     base_idx = ano_corrente_mpm * 12 + mes_corrente_mpm
-    _mes_idx_mpm = _entrada_atraso_mpm.dt.year * 12 + _entrada_atraso_mpm.dt.month
+    _mes_idx_mpm = _venc_mpm.dt.year * 12 + _venc_mpm.dt.month
     _offset_meses = (_mes_idx_mpm - base_idx)  # 1 = próximo mês (M1), 2 = M2, ...
 
     df_mpm = df_final.copy()
@@ -1717,7 +1737,7 @@ with aba_mp_por_mes:
 
     # Contratos além do horizonte exibido (M{n+1} em diante)
     total_alem = int((df_mpm['_offset_meses'] > horizonte_meses).sum())
-    # Contratos que entram em atraso neste mês ou já estão atrasados (offset <= 0) — fora do escopo "pra frente"
+    # Contratos com MP vencendo neste mês ou já vencida (offset <= 0) — fora do escopo "pra frente"
     total_passado_ou_atual = int((df_mpm['_offset_meses'] <= 0).sum())
 
     # KPIs de topo
@@ -1727,7 +1747,7 @@ with aba_mp_por_mes:
         c1, c2, c3 = st.columns(3)
         c1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Contratos em M1..M" + str(horizonte_meses)}</div><div class="kpi-value">{f"{total_no_horizonte:,}".replace(",", ".")}</div><div class="kpi-delta">{"Na janela exibida"}</div></div>''', unsafe_allow_html=True)
         c2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Além de M" + str(horizonte_meses)}</div><div class="kpi-value">{f"{total_alem:,}".replace(",", ".")}</div><div class="kpi-delta">{"Vencem mais à frente"}</div></div>''', unsafe_allow_html=True)
-        c3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Mês atual / já em atraso"}</div><div class="kpi-value">{f"{total_passado_ou_atual:,}".replace(",", ".")}</div><div class="kpi-delta">{"Fora do recorte futuro"}</div></div>''', unsafe_allow_html=True)
+        c3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Mês atual / já vencido"}</div><div class="kpi-value">{f"{total_passado_ou_atual:,}".replace(",", ".")}</div><div class="kpi-delta">{"Fora do recorte futuro"}</div></div>''', unsafe_allow_html=True)
 
     st.write("")
 
