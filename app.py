@@ -915,13 +915,14 @@ if erro_arquivos_estaveis and not prestador_mapeado:
 # ==========================================
 # 8. RENDERIZAÇÃO DAS ABAS
 # ==========================================
-aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_mp_agendado, aba_hist, aba_sem_cobertura, aba_consulta = st.tabs([
+aba_dashboard, aba_franquias, aba_capacidade, aba_diaria, aba_mailing, aba_m0, aba_mp_por_mes, aba_mp_agendado, aba_hist, aba_sem_cobertura, aba_consulta = st.tabs([
     "Visão Executiva", 
     "Visão por Franquias", 
     "Atraso vs Capacidade",
     "Capacidade Diária",
     "Mailing Acionável",
     "M0",
+    "Quebra de MP por Mês",
     "MP Agendado",
     "Funil Mensal",
     "Sem Cobertura de CEP",
@@ -1360,7 +1361,7 @@ with aba_mailing:
                 )
                 
                 cols_finais = [
-                    'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                    'FOZ_CodigoItem__c', 'Account.Name', 'Qtd_Contratos_Cliente',
                     'Status_Financeiro', 'Data_Vencimento_MP', 'Dias_Atraso',
                     'Prestador_CEP', 'Capacidade Disponível'
                 ]
@@ -1368,7 +1369,6 @@ with aba_mailing:
                 df_exibicao_mail = df_mail_final[cols_finais].rename(columns={
                     'FOZ_CodigoItem__c': 'Cód. Item',
                     'Account.Name': 'Cliente',
-                    'Account.CNPJ__c': 'CNPJ',
                     'Qtd_Contratos_Cliente': 'Qtd Contratos',
                     'Status_Financeiro': 'Status Fin.',
                     'Data_Vencimento_MP': 'Vencimento MP',
@@ -1494,7 +1494,7 @@ with aba_mailing:
                     # LGPD: sem telefones no painel online (use o gerador local de mailing)
                     cols_na = [
                         'Motivo_Nao_Acionamento',
-                        'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                        'FOZ_CodigoItem__c', 'Account.Name', 'Qtd_Contratos_Cliente',
                         'Status_Financeiro', 'Vencimento MP', 'Dias_Atraso',
                         'Prestador_CEP_Display', 'Capacidade Disponível'
                     ]
@@ -1503,7 +1503,6 @@ with aba_mailing:
                         'Motivo_Nao_Acionamento': 'Motivo',
                         'FOZ_CodigoItem__c': 'Cód. Item',
                         'Account.Name': 'Cliente',
-                        'Account.CNPJ__c': 'CNPJ',
                         'Qtd_Contratos_Cliente': 'Qtd Contratos',
                         'Status_Financeiro': 'Status Fin.',
                         'Dias_Atraso': 'Dias Atraso',
@@ -1621,13 +1620,12 @@ with aba_m0:
         if not df_m0_view.empty:
             df_m0_view['Vencimento MP'] = df_m0_view['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
             df_m0_show = df_m0_view[[
-                'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                'FOZ_CodigoItem__c', 'Account.Name', 'Qtd_Contratos_Cliente',
                 'Vencimento MP', 'FOZ_EndFranquiaForm__c', 'Status_Financeiro',
                 'Tem_OS_Aberta', 'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento'
             ]].rename(columns={
                 'FOZ_CodigoItem__c': 'Cód. Item',
                 'Account.Name': 'Cliente',
-                'Account.CNPJ__c': 'CNPJ',
                 'Qtd_Contratos_Cliente': 'Qtd Contratos',
                 'FOZ_EndFranquiaForm__c': 'Franquia',
                 'Status_Financeiro': 'Status Fin.',
@@ -1649,6 +1647,149 @@ with aba_m0:
             )
         else:
             st.info("Nenhum contrato encontrado com os filtros aplicados.")
+
+# === ABA: QUEBRA DE MP POR MÊS (M1, M2, M3...) ===
+with aba_mp_por_mes:
+    st.markdown("### 🗓️ Quebra de MP por Mês (M1, M2, M3...)")
+    st.markdown(
+        "Distribui a base ativa pelos próximos meses, mostrando **quantos contratos entram em atraso** "
+        "em cada mês à frente. Segue a **mesma regra do M0**: o mês considerado é o mês em que o contrato "
+        "**entra em atraso** (vencimento da MP + 30 dias de carência), e não o mês cru do vencimento. "
+        "**M1** = um mês à frente do mês corrente, **M2** = dois meses à frente, e assim por diante."
+    )
+
+    # Base de referência temporal (mesma lógica do M0)
+    hoje_mpm = datetime.now(FUSO_BR)
+    mes_corrente_mpm = hoje_mpm.month
+    ano_corrente_mpm = hoje_mpm.year
+
+    nomes_meses_mpm = {
+        1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho',
+        7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'
+    }
+
+    st.caption(f"📅 Hoje é {hoje_mpm.strftime('%d/%m/%Y')}. Cada coluna 'M' é contada a partir do mês corrente ({nomes_meses_mpm[mes_corrente_mpm]}/{ano_corrente_mpm}).")
+
+    # Quantidade de meses à frente a exibir (M1..Mn)
+    horizonte_meses = st.slider(
+        "Quantos meses à frente exibir (M1 até Mn):",
+        min_value=3, max_value=18, value=12, step=1, key="mpm_horizonte"
+    )
+
+    # Entrada em atraso = vencimento da MP + carência (mesma regra do Atraso_Base e do M0).
+    # Usa a base completa (df_final) para a visão crua, igual ao M0.
+    _entrada_atraso_mpm = df_final['FOZ_DataProximaMP__c'] + pd.Timedelta(days=CARENCIA_ATRASO_DIAS)
+
+    # Índice de mês absoluto (ano*12 + mês) para calcular a diferença em meses de forma robusta
+    base_idx = ano_corrente_mpm * 12 + mes_corrente_mpm
+    _mes_idx_mpm = _entrada_atraso_mpm.dt.year * 12 + _entrada_atraso_mpm.dt.month
+    _offset_meses = (_mes_idx_mpm - base_idx)  # 1 = próximo mês (M1), 2 = M2, ...
+
+    df_mpm = df_final.copy()
+    df_mpm['_offset_meses'] = _offset_meses
+
+    # Monta a tabela-resumo M1..Mn
+    linhas_resumo = []
+    for n in range(1, horizonte_meses + 1):
+        mes_n = mes_corrente_mpm + n
+        ano_n = ano_corrente_mpm + (mes_n - 1) // 12
+        mes_n = (mes_n - 1) % 12 + 1
+        rotulo_mes = f"{nomes_meses_mpm[mes_n]}/{ano_n}"
+
+        df_bucket = df_mpm[df_mpm['_offset_meses'] == n]
+        total_n = len(df_bucket)
+        adim_n = int((df_bucket['Status_Financeiro'] == StatusFin.ADIMPLENTE).sum())
+        inadim_n = int((df_bucket['Status_Financeiro'] == StatusFin.INADIMPLENTE).sum())
+        com_os_n = int(df_bucket['Tem_OS_Aberta'].sum()) if 'Tem_OS_Aberta' in df_bucket.columns else 0
+        sem_os_n = total_n - com_os_n
+
+        linhas_resumo.append({
+            'Período': f'M{n}',
+            'Mês de Vencimento': rotulo_mes,
+            'Contratos': total_n,
+            'Adimplentes': adim_n,
+            'Inadimplentes': inadim_n,
+            'Com OS aberta': com_os_n,
+            'Sem OS aberta': sem_os_n,
+        })
+
+    df_resumo_mpm = pd.DataFrame(linhas_resumo)
+
+    # Contratos além do horizonte exibido (M{n+1} em diante)
+    total_alem = int((df_mpm['_offset_meses'] > horizonte_meses).sum())
+    # Contratos que entram em atraso neste mês ou já estão atrasados (offset <= 0) — fora do escopo "pra frente"
+    total_passado_ou_atual = int((df_mpm['_offset_meses'] <= 0).sum())
+
+    # KPIs de topo
+    total_no_horizonte = int(df_resumo_mpm['Contratos'].sum())
+    with st.container(border=True):
+        st.markdown("#### 📊 Resumo da janela exibida")
+        c1, c2, c3 = st.columns(3)
+        c1.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Contratos em M1..M" + str(horizonte_meses)}</div><div class="kpi-value">{f"{total_no_horizonte:,}".replace(",", ".")}</div><div class="kpi-delta">{"Na janela exibida"}</div></div>''', unsafe_allow_html=True)
+        c2.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Além de M" + str(horizonte_meses)}</div><div class="kpi-value">{f"{total_alem:,}".replace(",", ".")}</div><div class="kpi-delta">{"Vencem mais à frente"}</div></div>''', unsafe_allow_html=True)
+        c3.markdown(f'''<div class="kpi-container"><div class="kpi-title">{"Mês atual / já em atraso"}</div><div class="kpi-value">{f"{total_passado_ou_atual:,}".replace(",", ".")}</div><div class="kpi-delta">{"Fora do recorte futuro"}</div></div>''', unsafe_allow_html=True)
+
+    st.write("")
+
+    # Tabela-resumo (formata milhares com ponto para exibição)
+    df_resumo_show = df_resumo_mpm.copy()
+    for col in ['Contratos', 'Adimplentes', 'Inadimplentes', 'Com OS aberta', 'Sem OS aberta']:
+        df_resumo_show[col] = df_resumo_show[col].map(lambda v: f"{v:,}".replace(",", "."))
+
+    st.markdown("#### 📋 Quebra por mês")
+    st.dataframe(df_resumo_show, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        label="📥 Baixar quebra por mês (Excel)",
+        data=df_para_excel_bytes(df_resumo_mpm, 'MP_por_Mes'),
+        file_name=f"quebra_mp_por_mes_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.ms-excel",
+        key="dl_mp_por_mes"
+    )
+
+    # Drill-down: detalhar os contratos de um M específico
+    st.markdown("---")
+    st.markdown("#### 🔎 Ver contratos de um mês específico")
+    opcoes_drill = [f"M{n} — {df_resumo_mpm.loc[n-1, 'Mês de Vencimento']}" for n in range(1, horizonte_meses + 1)]
+    escolha_drill = st.selectbox("Selecione o mês:", opcoes_drill, key="mpm_drill")
+    n_escolhido = int(escolha_drill.split("—")[0].strip().lstrip("M"))
+
+    df_detalhe = df_mpm[df_mpm['_offset_meses'] == n_escolhido].copy()
+    if df_detalhe.empty:
+        st.info("Nenhum contrato neste mês.")
+    else:
+        df_detalhe['Vencimento MP'] = df_detalhe['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
+        cols_det = [
+            'FOZ_CodigoItem__c', 'Account.Name', 'Qtd_Contratos_Cliente',
+            'Vencimento MP', 'FOZ_EndFranquiaForm__c', 'Status_Financeiro',
+            'Tem_OS_Aberta', 'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento'
+        ]
+        cols_det_existentes = [c for c in cols_det if c in df_detalhe.columns]
+        df_detalhe_show = df_detalhe[cols_det_existentes].rename(columns={
+            'FOZ_CodigoItem__c': 'Cód. Item',
+            'Account.Name': 'Cliente',
+            'Qtd_Contratos_Cliente': 'Qtd Contratos',
+            'FOZ_EndFranquiaForm__c': 'Franquia',
+            'Status_Financeiro': 'Status Fin.',
+            'Tem_OS_Aberta': 'Tem OS?',
+            'Numero_Caso': 'Nº OS',
+            'Tipo_Servico': 'Tipo de Serviço',
+            'Data_Agendamento': 'Data OS (Agendada)'
+        }).fillna({'Nº OS': '-', 'Tipo de Serviço': '-', 'Data OS (Agendada)': '-'})
+        if 'Tem OS?' in df_detalhe_show.columns:
+            df_detalhe_show['Tem OS?'] = df_detalhe_show['Tem OS?'].map({True: 'Sim', False: 'Não'})
+
+        st.caption(f"**{len(df_detalhe_show):,} contrato(s)** em {escolha_drill}.".replace(",", "."))
+        st.dataframe(df_detalhe_show, use_container_width=True, hide_index=True)
+
+        st.download_button(
+            label="📥 Baixar detalhe deste mês (Excel)",
+            data=df_para_excel_bytes(df_detalhe_show, f'M{n_escolhido}'),
+            file_name=f"detalhe_M{n_escolhido}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.ms-excel",
+            key="dl_mp_por_mes_detalhe"
+        )
+
 
 # === ABA: MP AGENDADO (quebra por mês da data agendada) ===
 with aba_mp_agendado:
@@ -2475,7 +2616,7 @@ with aba_consulta:
                 
                 # Monta a tabela final na ordem que faz sentido para consulta operacional
                 cols_consulta = [
-                    'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c', 'Qtd_Contratos_Cliente',
+                    'FOZ_CodigoItem__c', 'Account.Name', 'Qtd_Contratos_Cliente',
                     'Classificacao', 'Status_Financeiro', 'FOZ_EndFranquiaForm__c', 'CEP_Limpo',
                     'Status_MP_Real', 'AGING_MP', 'Dias_Atraso', 
                     'Vencimento MP', 'Última MP',
@@ -2489,7 +2630,6 @@ with aba_consulta:
                 df_show = df_encontrados[cols_existentes].rename(columns={
                     'FOZ_CodigoItem__c': 'Cód. Item',
                     'Account.Name': 'Cliente',
-                    'Account.CNPJ__c': 'CNPJ',
                     'Qtd_Contratos_Cliente': 'Qtd Contratos',
                     'Classificacao': 'Classificação',
                     'Status_Financeiro': 'Status Fin.',
@@ -2549,14 +2689,14 @@ with aba_consulta:
         
         df_isentos_val['Vencimento MP'] = df_isentos_val['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
         cols_is = [
-            'FOZ_CodigoItem__c', 'Account.Name', 'Account.CNPJ__c',
+            'FOZ_CodigoItem__c', 'Account.Name',
             'FOZ_EndFranquiaForm__c', 'Status_Financeiro', 'Vencimento MP',
             'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento'
         ]
         cols_is_existentes = [c for c in cols_is if c in df_isentos_val.columns]
         df_isentos_show = df_isentos_val[cols_is_existentes].rename(columns={
             'FOZ_CodigoItem__c': 'Cód. Item', 'Account.Name': 'Cliente',
-            'Account.CNPJ__c': 'CNPJ', 'FOZ_EndFranquiaForm__c': 'Franquia',
+            'FOZ_EndFranquiaForm__c': 'Franquia',
             'Status_Financeiro': 'Status Fin.', 'Numero_Caso': 'Nº OS',
             'Tipo_Servico': 'Tipo de Serviço', 'Data_Agendamento': 'Data OS'
         }).fillna({'Nº OS': '-', 'Tipo de Serviço': '-', 'Data OS': '-'})
