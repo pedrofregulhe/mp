@@ -351,6 +351,7 @@ def carregar_dados_completos():
 
         lista_os.append({
             'CodigoItem': asset.get('FOZ_CodigoItem__c'), 'Tem_OS_Aberta': True,
+            'Status_Caso_OS': caso.get('Status'),
             'Agendado_Mes_Atual': agendado_mes_atual, 'Agendado_Hoje': agendado_hoje,
             'Tem_Data': tem_data, 'Numero_Caso': caso.get('CaseNumber'),
             'Tipo_Servico': tipo_servico, 'Data_Agendamento_Raw': data_agendamento_raw,
@@ -1672,6 +1673,10 @@ with aba_mp_por_mes:
   eventuais contratos com OS de desinstalação aberta, para dar a visão crua do volume.
 - **O que cada linha mostra:** para o mês daquele "M", o total de contratos com MP vencendo e a quebra
   por situação financeira (Adimplentes / Inadimplentes) e por OS (com/sem OS aberta).
+- **O que conta como "OS aberta":** apenas OS com Caso em andamento. OS **Executada com Sucesso**
+  (MP já feita, normalmente de um ciclo anterior), **Cancelada** ou **Fechada** **não** contam como
+  aberta — nesses casos o contrato aparece como *sem OS aberta* e os dados da OS antiga são omitidos
+  no detalhe. O contrato continua contado no mês, pois a MP é uma obrigação futura.
 - **Fora do recorte futuro:** contratos com vencimento **no mês atual ou já vencidos** não entram nas
   colunas M1+ — eles ficam de fora desta visão, que olha apenas os meses à frente.
             """
@@ -1708,6 +1713,21 @@ with aba_mp_por_mes:
     df_mpm = df_final.copy()
     df_mpm['_offset_meses'] = _offset_meses
 
+    # Correção de OS (experiência do casosporitem.py): uma OS só conta como ABERTA se o
+    # status do CASO não for um estado terminal. 'Executado com Sucesso' (MP já realizada,
+    # em geral de um ciclo anterior), 'Cancelado' e 'Fechado' NÃO são OS abertas.
+    # Obs.: 'Cancelado'/'Fechado' já são excluídos na query; reforçamos aqui por robustez.
+    # Esta correção vale SOMENTE para esta aba.
+    STATUS_OS_NAO_ABERTA = {'Cancelado', 'Executado com Sucesso', 'Fechado'}
+    if 'Status_Caso_OS' in df_mpm.columns:
+        _status_caso_norm = df_mpm['Status_Caso_OS'].astype(str).str.strip()
+        df_mpm['_os_aberta_real'] = (
+            (df_mpm['Tem_OS_Aberta'] == True) &
+            (~_status_caso_norm.isin(STATUS_OS_NAO_ABERTA))
+        )
+    else:
+        df_mpm['_os_aberta_real'] = (df_mpm.get('Tem_OS_Aberta', False) == True)
+
     # Monta a tabela-resumo M1..Mn
     linhas_resumo = []
     for n in range(1, horizonte_meses + 1):
@@ -1720,7 +1740,7 @@ with aba_mp_por_mes:
         total_n = len(df_bucket)
         adim_n = int((df_bucket['Status_Financeiro'] == StatusFin.ADIMPLENTE).sum())
         inadim_n = int((df_bucket['Status_Financeiro'] == StatusFin.INADIMPLENTE).sum())
-        com_os_n = int(df_bucket['Tem_OS_Aberta'].sum()) if 'Tem_OS_Aberta' in df_bucket.columns else 0
+        com_os_n = int(df_bucket['_os_aberta_real'].sum()) if '_os_aberta_real' in df_bucket.columns else 0
         sem_os_n = total_n - com_os_n
 
         linhas_resumo.append({
@@ -1763,10 +1783,18 @@ with aba_mp_por_mes:
         st.info("Nenhum contrato neste mês.")
     else:
         df_detalhe['Vencimento MP'] = df_detalhe['FOZ_DataProximaMP__c'].dt.strftime('%d/%m/%Y')
+
+        # Onde a OS não está realmente aberta (executada com sucesso / cancelada / fechada),
+        # limpa os dados da OS para não exibir uma OS antiga como se fosse pendente.
+        mask_sem_os_real = ~df_detalhe['_os_aberta_real']
+        for _c in ['Numero_Caso', 'Tipo_Servico', 'Data_Agendamento']:
+            if _c in df_detalhe.columns:
+                df_detalhe.loc[mask_sem_os_real, _c] = None
+
         cols_det = [
             'FOZ_CodigoItem__c', 'Account.Name', 'Qtd_Contratos_Cliente',
             'Vencimento MP', 'FOZ_EndFranquiaForm__c', 'Status_Financeiro',
-            'Tem_OS_Aberta', 'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento'
+            '_os_aberta_real', 'Numero_Caso', 'Tipo_Servico', 'Data_Agendamento'
         ]
         cols_det_existentes = [c for c in cols_det if c in df_detalhe.columns]
         df_detalhe_show = df_detalhe[cols_det_existentes].rename(columns={
@@ -1775,7 +1803,7 @@ with aba_mp_por_mes:
             'Qtd_Contratos_Cliente': 'Qtd Contratos',
             'FOZ_EndFranquiaForm__c': 'Franquia',
             'Status_Financeiro': 'Status Fin.',
-            'Tem_OS_Aberta': 'Tem OS?',
+            '_os_aberta_real': 'Tem OS?',
             'Numero_Caso': 'Nº OS',
             'Tipo_Servico': 'Tipo de Serviço',
             'Data_Agendamento': 'Data OS (Agendada)'
