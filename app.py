@@ -383,7 +383,21 @@ def carregar_dados_completos():
         ]]
     del lista_os, registros_os  # libera memória das listas iteradas
     if not df_os.empty:
-        df_os = df_os.sort_values(by=['Agendado_Mes_Atual', 'Tem_Data'], ascending=[False, False]).drop_duplicates(subset=['CodigoItem'])
+        # Dedup por item: mantém UMA OS por CodigoItem. A prioridade agora considera, ANTES
+        # de tudo, se a OS está genuinamente ABERTA (Caso não terminal). Isso evita que um
+        # item com uma MP já 'Executada com Sucesso' (ciclo anterior) + uma MP nova 'Agendada'
+        # acabe representado pela OS executada, fazendo a OS aberta "sumir". Depois desempata
+        # por agendamento no mês atual e por ter data.
+        STATUS_OS_TERMINAL = {'Cancelado', 'Executado com Sucesso', 'Fechado'}
+        if 'Status_Caso_OS' in df_os.columns:
+            _st_os = df_os['Status_Caso_OS'].astype(str).str.strip()
+            df_os['_os_aberta_prio'] = (~_st_os.isin(STATUS_OS_TERMINAL)).astype(int)
+        else:
+            df_os['_os_aberta_prio'] = 1
+        df_os = df_os.sort_values(
+            by=['_os_aberta_prio', 'Agendado_Mes_Atual', 'Tem_Data'],
+            ascending=[False, False, False]
+        ).drop_duplicates(subset=['CodigoItem']).drop(columns=['_os_aberta_prio'])
     
     col_cnpj_ativos = 'Account.CNPJ__c'; col_cnpj_contatos = 'Account.FOZ_CNPJ__c'
     df_ativos[col_cnpj_ativos] = df_ativos[col_cnpj_ativos].apply(manter_apenas_numeros)
@@ -858,7 +872,10 @@ with st.sidebar:
     
     st.write("")
     if st.button("🔄 Atualizar Dados", key="btn_atualizar_topo", help="Recarrega os dados do Salesforce e os arquivos de capacidade", use_container_width=True):
+        # A base do Salesforce é carregada com @st.cache_resource; limpar só o cache_data
+        # NÃO recarregava os dados. Limpamos os dois para o refresh manual funcionar de fato.
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.rerun()
 
 # Aplica o filtro global. Se nada estiver selecionado, considera "todas as classificações".
